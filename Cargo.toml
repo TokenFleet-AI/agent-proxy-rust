@@ -4,12 +4,12 @@ resolver = "3"
 
 [workspace.package]
 version = "0.1.0"
-authors = ["Your Name <YourName@yourdomain.com>"]
+authors = ["baoyx <baoyx19870908@gmail.com>"]
 edition = "2024"
 license = "Apache-2.0"
-documentation = "https://docs.rs/"
-repository = "https://github.com/TODO"
-homepage = "https://github.com/TODO"
+documentation = "https://docs.rs/agent-proxy-rust"
+repository = "https://github.com/TokenFleet-AI/agent-proxy-rust"
+homepage = "https://github.com/TokenFleet-AI/agent-proxy-rust"
 readme = "README.md"
 
 [workspace.dependencies]
