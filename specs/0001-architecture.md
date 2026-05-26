@@ -295,6 +295,7 @@ For non-streaming requests (`stream: false`), the proxy MAY retry on connection 
 
 ## Related Projects
 
-- `tokenless-schema` — JSON schema & response compression (schema_compressor + response_compressor)
-- `llm-bridge-core` — Anthropic ↔ OpenAI Chat ↔ OpenAI Responses protocol translation
-- http-proxy example — reference implementation in llm-bridge-rust/crates/core/examples/
+- [tokenless-schema](https://github.com/TokenFleet-AI/tokenless) — JSON schema & response compression (schema_compressor + response_compressor)
+- [llm-bridge-core](https://github.com/TokenFleet-AI/llm-bridge-rust/tree/main/crates/core) — Anthropic ↔ OpenAI Chat ↔ OpenAI Responses protocol translation
+- [agent-proxy-pricing](https://github.com/TokenFleet-AI/agent-proxy-pricing) — Community-maintained provider & model pricing registry (Phase 2)
+- http-proxy example — reference implementation in [llm-bridge-rust/crates/core/examples/](https://github.com/TokenFleet-AI/llm-bridge-rust/tree/main/crates/core/examples)
