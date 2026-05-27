@@ -76,7 +76,6 @@ See [specs/](specs/) for detailed design documents.
 
 - [tokenless-schema](https://github.com/TokenFleet-AI/tokenless) — JSON schema & response compression
 - [llm-bridge-core](https://github.com/TokenFleet-AI/llm-bridge-rust/tree/master/crates/core) — Anthropic ↔ OpenAI protocol translation
-- [agent-proxy-pricing](https://github.com/TokenFleet-AI/agent-proxy-pricing) — Community provider & model pricing registry (Phase 2)
 
 ## License
 

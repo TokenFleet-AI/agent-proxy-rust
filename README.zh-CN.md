@@ -76,7 +76,6 @@ agent-proxy channel add openrouter \
 
 - [tokenless-schema](https://github.com/TokenFleet-AI/tokenless) — JSON schema 与响应压缩
 - [llm-bridge-core](https://github.com/TokenFleet-AI/llm-bridge-rust/tree/master/crates/core) — Anthropic ↔ OpenAI 协议转换
-- [agent-proxy-pricing](https://github.com/TokenFleet-AI/agent-proxy-pricing) — 社区维护的厂商与模型定价注册表（Phase 2）
 
 ## 许可证
 

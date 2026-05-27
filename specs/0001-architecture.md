@@ -51,15 +51,13 @@ storage ← storage-sqlite
 core ← model-router, compress, bridge, cost
           ↑                        ↑
      tokenless-schema         llm-bridge-core
-          ↑ (runtime fetch)
-     agent-proxy-pricing   ← provider & model pricing data (independent repo)
 ```
 
 Core defines the `ProxyMiddleware` trait. Other crates implement it. Core has zero knowledge of tokenless, llm-bridge, or storage backends.
 
 Storage is a trait-based abstraction (see `0014-storage-abstraction.md`). Middlewares depend on `Box<dyn Storage>`, not on SQLite directly. SQLite is the Phase 1 implementation; PostgreSQL can be added without rewriting middleware code.
 
-Provider and model pricing data lives in a separate community repository (`agent-proxy-pricing`), fetched at startup with a builtin fallback of 5 core providers. This keeps pricing updates decoupled from proxy releases.
+Provider and model pricing data is embedded in the SQLite seed migration (65 model mappings across 7 vendors). A community repository for live pricing updates is planned for Phase 2.
 
 ## ProxyMiddleware Trait
 
@@ -306,5 +304,4 @@ For non-streaming requests (`stream: false`), the proxy MAY retry on connection 
 
 - [tokenless-schema](https://github.com/TokenFleet-AI/tokenless) — JSON schema & response compression (schema_compressor + response_compressor)
 - [llm-bridge-core](https://github.com/TokenFleet-AI/llm-bridge-rust/tree/master/crates/core) — Anthropic ↔ OpenAI Chat ↔ OpenAI Responses protocol translation
-- [agent-proxy-pricing](https://github.com/TokenFleet-AI/agent-proxy-pricing) — Community-maintained provider & model pricing registry (Phase 2)
 - http-proxy example — reference implementation in [llm-bridge-rust/crates/core/examples/](https://github.com/TokenFleet-AI/llm-bridge-rust/tree/master/crates/core/examples)

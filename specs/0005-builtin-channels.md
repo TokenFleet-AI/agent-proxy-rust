@@ -1,7 +1,7 @@
 # 0005 — Provider & Model Registry
 
 > **Phase 1**: 4 core providers embedded (Anthropic/OpenAI/Google/DeepSeek). No remote fetch.
-> **Phase 2**: Community repository `agent-proxy-pricing`, startup fetch (3s timeout), full 10+ provider registry.
+> **Phase 2**: Community pricing registry with startup fetch (3s timeout). Currently pricing is embedded in seed migration (65 model mappings).
 
 > **Provider = 厂商** (who makes the model). **Channel = 渠道** (how you reach them). See `0003-channel-model.md` for channel management.
 
@@ -133,7 +133,7 @@ github.com/tokenfleet-ai/agent-proxy-pricing/
 └── CHANGELOG.md
 ```
 
-The proxy fetches this on startup (with 3s timeout, falls back to builtin data).
+Phase 2: the proxy will fetch pricing from this community repository on startup (3s timeout, falls back to builtin seed data). Currently all pricing is embedded in the SQLite seed migration.
 
 ### Provider JSON Format
 
