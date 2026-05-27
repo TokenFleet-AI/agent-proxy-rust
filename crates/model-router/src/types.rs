@@ -2,6 +2,7 @@
 
 use std::time::{Duration, Instant};
 
+use chrono::Datelike;
 use serde::{Deserialize, Serialize};
 
 // ---------------------------------------------------------------------------
@@ -150,6 +151,69 @@ pub enum ExhaustedAction {
     FallbackToMetered,
     /// Return an error (503).
     Block,
+}
+
+/// Per-mapping monthly quota consumption tracker.
+#[derive(Debug, Clone)]
+pub struct QuotaUsage {
+    /// Number of requests this month.
+    pub requests_this_month: u64,
+    /// Number of tokens consumed this month.
+    pub tokens_this_month: u64,
+    /// The month this counter is tracking (year * 12 + month).
+    pub month_key: u32,
+}
+
+impl QuotaUsage {
+    /// Returns the current month key (year * 12 + month, Jan = 1).
+    #[must_use]
+    pub fn current_month_key() -> u32 {
+        let now = chrono::Utc::now();
+        u32::try_from(now.year()).unwrap_or(2026) * 12 + now.month()
+    }
+
+    /// Creates a new counter for the current month.
+    #[must_use]
+    pub fn new() -> Self {
+        Self {
+            requests_this_month: 0,
+            tokens_this_month: 0,
+            month_key: Self::current_month_key(),
+        }
+    }
+
+    /// Resets if the month has changed.
+    pub fn maybe_reset(&mut self) {
+        let current = Self::current_month_key();
+        if current != self.month_key {
+            self.requests_this_month = 0;
+            self.tokens_this_month = 0;
+            self.month_key = current;
+        }
+    }
+
+    /// Records a request with its token usage.
+    pub fn record_usage(&mut self, tokens: u64) {
+        self.maybe_reset();
+        self.requests_this_month += 1;
+        self.tokens_this_month += tokens;
+    }
+
+    /// Checks whether `quota` has been exceeded.
+    #[must_use]
+    pub fn is_within_quota(&self, quota: Option<&Quota>) -> bool {
+        match quota {
+            None | Some(Quota::Unlimited) => true,
+            Some(Quota::MaxRequests { per_month }) => self.requests_this_month < *per_month,
+            Some(Quota::MaxTokens { per_month }) => self.tokens_this_month < *per_month,
+        }
+    }
+}
+
+impl Default for QuotaUsage {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 // ---------------------------------------------------------------------------

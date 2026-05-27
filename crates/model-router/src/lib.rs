@@ -23,7 +23,9 @@ use async_trait::async_trait;
 use dashmap::DashMap;
 use secrecy::ExposeSecret;
 use tracing::{debug, warn};
-pub use types::{ChannelBilling, ChannelHealth, ChannelState, ExhaustedAction, Pricing, Quota};
+pub use types::{
+    ChannelBilling, ChannelHealth, ChannelState, ExhaustedAction, Pricing, Quota, QuotaUsage,
+};
 
 /// Cooldown period before an unhealthy channel is retried.
 const COOLDOWN: Duration = Duration::from_secs(60);
@@ -43,6 +45,7 @@ struct ResolvedChannel {
 /// Parsed in-memory representation of a model mapping.
 #[derive(Debug, Clone)]
 struct ResolvedMapping {
+    mapping_id: String,
     client_name: String,
     upstream_name: String,
     billing: ChannelBilling,
@@ -51,6 +54,8 @@ struct ResolvedMapping {
 /// Lightweight mapping info stored in the context extension.
 #[derive(Debug, Clone)]
 pub struct SelectedMappingInfo {
+    /// Model mapping ID for quota tracking.
+    pub mapping_id: String,
     /// Client-facing model name.
     pub client_name: String,
     /// Upstream model name sent to the API.
@@ -64,6 +69,8 @@ pub struct SelectedMappingInfo {
 pub struct ModelRouterMiddleware {
     channels: Vec<ResolvedChannel>,
     health: Arc<DashMap<String, ChannelState>>,
+    /// Per-mapping-id quota consumption counters. Keys match `model_mappings.id`.
+    quota_usage: Arc<DashMap<String, QuotaUsage>>,
 }
 
 impl ModelRouterMiddleware {
@@ -107,6 +114,7 @@ impl ModelRouterMiddleware {
                         })
                         .ok()?;
                     Some(ResolvedMapping {
+                        mapping_id: m.id,
                         client_name: m.client_name,
                         upstream_name: m.upstream_name,
                         billing,
@@ -128,6 +136,7 @@ impl ModelRouterMiddleware {
         Ok(Self {
             channels,
             health: Arc::new(DashMap::new()),
+            quota_usage: Arc::new(DashMap::new()),
         })
     }
 
@@ -174,7 +183,14 @@ impl ModelRouterMiddleware {
                 ..
             } = &m.billing
             {
-                if quota_available(quota.as_ref()) {
+                // Check actual monthly consumption against quota
+                let within_quota = self
+                    .quota_usage
+                    .entry(m.mapping_id.clone())
+                    .or_default()
+                    .is_within_quota(quota.as_ref());
+
+                if within_quota {
                     return Ok((ch, m));
                 }
                 if *on_exhausted == ExhaustedAction::Block {
@@ -311,6 +327,7 @@ impl ProxyMiddleware for ModelRouterMiddleware {
         ctx.insert(
             EXT_SELECTED_MAPPING,
             SelectedMappingInfo {
+                mapping_id: mapping.mapping_id.clone(),
                 client_name: mapping.client_name.clone(),
                 upstream_name: mapping.upstream_name.clone(),
                 is_flat_fee: mapping.billing.is_flat_fee(),
@@ -332,6 +349,18 @@ impl ProxyMiddleware for ModelRouterMiddleware {
 
         if channel_id.is_empty() {
             return Ok(());
+        }
+
+        // Record quota usage for the selected mapping
+        if let Some(mapping_info) = ctx.get::<SelectedMappingInfo>(EXT_SELECTED_MAPPING)
+            && mapping_info.is_flat_fee
+        {
+            let token_count =
+                serde_json::from_slice(&res.body).map_or(0, |body| extract_token_count(&body));
+            self.quota_usage
+                .entry(mapping_info.mapping_id.clone())
+                .or_default()
+                .record_usage(token_count);
         }
 
         if res.status.is_server_error() {
@@ -382,15 +411,16 @@ fn parse_protocol(s: &str) -> Result<ApiFormat, ProxyError> {
     }
 }
 
-fn quota_available(quota: Option<&Quota>) -> bool {
-    match quota {
-        None | Some(Quota::Unlimited) => true,
-        Some(Quota::MaxRequests { per_month } | Quota::MaxTokens { per_month }) => {
-            // Phase 1: no usage tracking — only degenerate per_month=0 means exhausted.
-            // per_month>0 is treated as sufficient until consumption tracking is added.
-            *per_month > 0
-        }
-    }
+/// Returns the total token count from an upstream response body for quota tracking.
+fn extract_token_count(body: &serde_json::Value) -> u64 {
+    body.get("usage").map_or(0, |u| {
+        u.get("input_tokens")
+            .and_then(serde_json::Value::as_u64)
+            .unwrap_or(0)
+            + u.get("output_tokens")
+                .and_then(serde_json::Value::as_u64)
+                .unwrap_or(0)
+    })
 }
 
 // ── Tests ───────────────────────────────────────────────────────────
@@ -431,6 +461,7 @@ mod tests {
         exhausted: ExhaustedAction,
     ) -> ResolvedMapping {
         ResolvedMapping {
+            mapping_id: format!("test:{client}"),
             client_name: client.into(),
             upstream_name: upstream.into(),
             billing: ChannelBilling::FlatFee {
@@ -443,6 +474,7 @@ mod tests {
 
     fn make_mapping_metered(client: &str, upstream: &str) -> ResolvedMapping {
         ResolvedMapping {
+            mapping_id: format!("test:{client}"),
             client_name: client.into(),
             upstream_name: upstream.into(),
             billing: ChannelBilling::Metered {
@@ -461,6 +493,7 @@ mod tests {
         ModelRouterMiddleware {
             channels,
             health: Arc::new(DashMap::new()),
+            quota_usage: Arc::new(DashMap::new()),
         }
     }
 
@@ -501,6 +534,7 @@ mod tests {
                 "Subscription",
                 ApiFormat::AnthropicMessages,
                 vec![ResolvedMapping {
+                    mapping_id: "flatfee-exhausted".into(),
                     client_name: "claude-sonnet".into(),
                     upstream_name: "claude-sonnet-4-7".into(),
                     billing: ChannelBilling::FlatFee {
@@ -530,6 +564,7 @@ mod tests {
             "Subscription",
             ApiFormat::AnthropicMessages,
             vec![ResolvedMapping {
+                mapping_id: "flatfee-blocked".into(),
                 client_name: "claude-sonnet".into(),
                 upstream_name: "claude-sonnet-4-7".into(),
                 billing: ChannelBilling::FlatFee {
@@ -586,6 +621,7 @@ mod tests {
     #[test]
     fn test_disabled_channel_skipped() {
         let mw = ModelRouterMiddleware {
+            quota_usage: Arc::new(DashMap::new()),
             channels: vec![ResolvedChannel {
                 channel_id: "disabled".into(),
                 channel_name: "Disabled".into(),
