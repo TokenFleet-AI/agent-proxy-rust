@@ -15,6 +15,7 @@
 | 0011 | [error-handling](0011-error-handling.md) | full | — | draft | ProxyError type hierarchy, error codes, HTTP status |
 | 0012 | [testing-strategy](0012-testing-strategy.md) | full | — | draft | Unit, integration, E2E, property, fuzz tests |
 | 0013 | [rate-limiting](0013-rate-limiting.md) | — | cloud extension | draft | Client/project/channel token buckets, fairness |
+| 0014 | [storage-abstraction](0014-storage-abstraction.md) | SQLite trait | PostgreSQL impl | draft | Pluggable Storage trait, channel/cost CRUD, migration strategy |
 
 ## Phase Strategy
 

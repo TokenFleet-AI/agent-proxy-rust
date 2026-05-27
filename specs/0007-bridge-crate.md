@@ -4,7 +4,7 @@
 
 ## Overview
 
-The bridge crate is a **thin wrapper** around the existing `llm-bridge-core` library (`github.com/TokenFleet-AI/llm-bridge-rust/crates/core`). 
+The bridge crate is a **thin wrapper** around the existing `llm-bridge-core` library (`github.com/TokenFleet-AI/llm-bridge-rust/crates/core`).
 
 - `llm-bridge-core` does the actual protocol translation: `model` (types), `transform` (non-streaming), `stream` (SSE frame-by-frame).
 - The bridge crate only implements `ProxyMiddleware` — reading from `ProxyRequest`/`ProxyResponse`, calling `llm-bridge-core`, and writing back.

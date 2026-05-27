@@ -1,0 +1,33 @@
+[package]
+name = "agent-proxy-rust-model-router"
+description = "Model routing and channel selection middleware for agent-proxy-rust"
+categories = ["development-tools"]
+keywords = ["proxy", "model", "router", "channel"]
+version.workspace = true
+authors.workspace = true
+edition.workspace = true
+license.workspace = true
+documentation.workspace = true
+repository.workspace = true
+homepage.workspace = true
+
+[dependencies]
+agent-proxy-rust-core = { path = "../core" }
+agent-proxy-rust-storage = { path = "../storage" }
+anyhow = { workspace = true }
+async-trait = "0.1"
+bytes = "1"
+dashmap = "6"
+http = "1"
+secrecy = "0.10"
+serde = { workspace = true, features = ["derive"] }
+serde_json = { workspace = true }
+tokio = { workspace = true, features = ["sync"] }
+tracing = { workspace = true }
+
+[dev-dependencies]
+rstest = { workspace = true }
+tokio = { workspace = true, features = ["rt", "macros"] }
+
+[lints]
+workspace = true

@@ -1,0 +1,10 @@
+[package]
+name = "agent-proxy-rust-bridge"
+description = "Protocol bridge middleware for agent-proxy-rust"
+version.workspace = true
+authors.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[lints]
+workspace = true

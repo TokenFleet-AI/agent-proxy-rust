@@ -22,8 +22,13 @@ struct CostRecord {
     project_path: String,       // /Users/xxx/my-app
     project_name: String,       // my-app (from git remote or dir name)
 
-    // Agent & Channel
+    // Agent & Role
     agent_type: String,         // claude / codex / gemini
+    agent_role: Option<String>, // Ruflo swarm role: architect / coder / tester / ...
+                                // Detected from x-api-key → role_mapping config.
+                                // None for non-Ruflo / standalone agent usage.
+
+    // Channel
     channel_name: String,
     channel_kind: ChannelKind,  // subscription / metered
 
@@ -61,6 +66,7 @@ CREATE TABLE cost_records (
     project_name TEXT NOT NULL DEFAULT '',
 
     agent_type TEXT NOT NULL,
+    agent_role TEXT,              -- NULL when not set (standalone agent, non-Ruflo)
     channel_name TEXT NOT NULL,
     channel_kind TEXT NOT NULL,
 
@@ -83,6 +89,7 @@ CREATE TABLE cost_records (
 CREATE INDEX idx_cost_project_date ON cost_records(project_path, timestamp);
 CREATE INDEX idx_cost_user_date ON cost_records(user_name, timestamp);
 CREATE INDEX idx_cost_model_date ON cost_records(model_name, timestamp);
+CREATE INDEX idx_cost_role_date ON cost_records(agent_role, timestamp);
 ```
 
 ## User Detection
@@ -104,6 +111,49 @@ Priority order:
 Project name extracted from:
 1. `git remote get-url origin` → parse repo name
 2. Directory basename
+
+## Role Detection (Ruflo Swarm)
+
+In Ruflo swarm deployments, multiple roles (architect, coder, tester, reviewer) each spawn their own agent instance. All use the same client type (e.g., all use Claude Code), so `agent_type` alone cannot distinguish roles.
+
+### Mechanism: API Key Mapping
+
+Each role's agent instance is configured with a unique proxy API key:
+
+```
+Ruflo agent_spawn:
+  architect → ANTHROPIC_API_KEY=sk-proxy-architect  (→ x-api-key header)
+  coder     → ANTHROPIC_API_KEY=sk-proxy-coder      (→ x-api-key header)
+  tester    → ANTHROPIC_API_KEY=sk-proxy-tester     (→ x-api-key header)
+```
+
+The proxy maintains a role mapping in config:
+
+```yaml
+# config.yaml
+role_mapping:
+  sk-proxy-architect: architect
+  sk-proxy-coder: coder
+  sk-proxy-tester: tester
+  sk-proxy-reviewer: reviewer
+```
+
+Detection flow in the auth Tower layer:
+
+```
+Request arrives with x-api-key: sk-proxy-coder
+  ↓
+Tower auth layer:
+  1. Look up x-api-key in role_mapping → role = "coder"
+  2. Inject role into ConnectionContext.agent_role
+  3. Replace x-api-key with real channel API key for upstream forwarding
+  ↓
+CostMiddleware reads ctx.agent_role → writes to CostRecord.agent_role
+```
+
+No custom headers required — every AI agent client already sends its API key. The proxy reuses this existing header for dual purpose (auth + role identification), then swaps to the real key before forwarding upstream.
+
+For non-Ruflo / standalone agent usage, `agent_role` is `None` (no mapping entry matches).
 
 ## Cost Calculation
 
@@ -251,6 +301,7 @@ CREATE TABLE cost_records_daily (
     date TEXT NOT NULL,               -- "2026-05-26"
     project_path TEXT NOT NULL,
     project_name TEXT NOT NULL,
+    agent_role TEXT,                  -- NULL = not set
     channel_name TEXT NOT NULL,
     model_name TEXT NOT NULL,
     total_input_tokens INTEGER NOT NULL,
@@ -289,6 +340,18 @@ FROM cost_records
 WHERE timestamp >= ? AND timestamp < ?
 GROUP BY day, model_name
 ORDER BY day;
+
+-- Per-role cost breakdown (Ruflo swarm)
+SELECT
+    agent_role,
+    SUM(input_tokens + output_tokens) as total_tokens,
+    SUM(actual_cost) as total_cost,
+    COUNT(*) as request_count
+FROM cost_records
+WHERE timestamp >= ? AND timestamp < ?
+  AND agent_role IS NOT NULL
+GROUP BY agent_role
+ORDER BY total_cost DESC;
 
 -- Compression savings summary
 SELECT

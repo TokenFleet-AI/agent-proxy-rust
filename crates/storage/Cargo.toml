@@ -1,0 +1,23 @@
+[package]
+name = "agent-proxy-rust-storage"
+description = "Backend-agnostic storage trait and data types for agent-proxy-rust"
+categories = ["database"]
+keywords = ["storage", "trait", "sqlite"]
+version.workspace = true
+authors.workspace = true
+edition.workspace = true
+license.workspace = true
+documentation.workspace = true
+repository.workspace = true
+homepage.workspace = true
+
+[dependencies]
+async-trait = "0.1"
+chrono = { version = "0.4", features = ["serde"] }
+secrecy = { version = "0.10", features = ["serde"] }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+
+[lints]
+workspace = true

@@ -1,0 +1,28 @@
+[package]
+name = "agent-proxy-rust-storage-sqlite"
+description = "SQLite backend implementation for agent-proxy-rust storage trait"
+categories = ["database"]
+keywords = ["storage", "sqlite", "agent-proxy"]
+version.workspace = true
+authors.workspace = true
+edition.workspace = true
+license.workspace = true
+documentation.workspace = true
+repository.workspace = true
+homepage.workspace = true
+
+[dependencies]
+agent-proxy-rust-storage = { path = "../storage" }
+async-trait = "0.1"
+chrono = "0.4"
+r2d2 = "0.8"
+r2d2_sqlite = "0.25"
+rusqlite = { version = "0.32", features = ["bundled"] }
+secrecy = "0.10"
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+tokio = { workspace = true }
+tracing = { workspace = true }
+
+[lints]
+workspace = true

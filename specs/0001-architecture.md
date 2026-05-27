@@ -29,10 +29,12 @@ Design principle: middleware trait is the extension point. Phase 2 features are 
 ```
 crates/
 ├── core/               Middleware trait + axum server engine + upstream forwarding
+├── storage/            Storage trait + data types (channel, cost, subscription)
+├── storage-sqlite/     SQLite Storage impl (Phase 1 default)
 ├── model-router/       Channel management + model name mapping + selection strategy
 ├── compress/           Token compression middleware (wraps tokenless-schema)
 ├── bridge/             Protocol translation middleware (wraps llm-bridge-core)
-└── cost/               Per-project cost tracking + compression savings (SQLite)
+└── cost/               Per-project cost tracking + compression savings
 
 apps/
 └── cli/                Standalone CLI binary (cargo install agent-proxy)
@@ -41,6 +43,11 @@ apps/
 ### Dependency Direction
 
 ```
+storage ← storage-sqlite
+    ↑
+    ├── model-router  (channels, model_mappings CRUD)
+    └── cost          (cost_records, subscription_fees CRUD)
+
 core ← model-router, compress, bridge, cost
           ↑                        ↑
      tokenless-schema         llm-bridge-core
@@ -48,7 +55,9 @@ core ← model-router, compress, bridge, cost
      agent-proxy-pricing   ← provider & model pricing data (independent repo)
 ```
 
-Core defines the `ProxyMiddleware` trait. Other crates implement it. Core has zero knowledge of tokenless, llm-bridge, or SQLite.
+Core defines the `ProxyMiddleware` trait. Other crates implement it. Core has zero knowledge of tokenless, llm-bridge, or storage backends.
+
+Storage is a trait-based abstraction (see `0014-storage-abstraction.md`). Middlewares depend on `Box<dyn Storage>`, not on SQLite directly. SQLite is the Phase 1 implementation; PostgreSQL can be added without rewriting middleware code.
 
 Provider and model pricing data lives in a separate community repository (`agent-proxy-pricing`), fetched at startup with a builtin fallback of 5 core providers. This keeps pricing updates decoupled from proxy releases.
 

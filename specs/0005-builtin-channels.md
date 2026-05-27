@@ -46,75 +46,68 @@ OpenAI                                 • url + api_key
 
 > cache_read = 0.1× input. All models use OpenAI Responses protocol by default.
 
-### Google DeepMind
-
-| model_id | official_name | input | output | context | notes |
-|----------|--------------|-------|--------|---------|-------|
-| gemini-pro | gemini-2.5-pro | $2.50 | $10.00 | 1M | |
-| gemini-flash | gemini-2.5-flash | $0.15 | $0.60 | 1M | |
-
 ### DeepSeek
 
-| model_id | official_name | input (CNY) | output (CNY) | cache_read (CNY) | context | notes |
-|----------|--------------|-------------|--------------|------------------|---------|-------|
-| deepseek-chat | deepseek-v4-flash | ¥1.00 | ¥2.00 | ¥0.02 | 128K | deprecates 2026-07-24 |
-| deepseek-reasoner | deepseek-v4-flash | ¥1.00 | ¥2.00 | ¥0.02 | 128K | deprecates 2026-07-24, same pricing |
-| deepseek-pro | deepseek-v4-pro | ¥3.00 | ¥6.00 | ¥0.025 | 256K | price cut to 1/4 on 2026-05-31 |
+DeepSeek thinks in deep (思考模式), providing reasoning capabilities. Both models support JSON output, tool calls, prefix continuation (Beta), and FIM completion (Beta, non-thinking mode only).
 
-> No separate cache_write fee (first cache miss = standard input). cache_read ≈ 1/50~1/120 of input.
+BASE URLs: OpenAI `api.deepseek.com` / Anthropic `api.deepseek.com/anthropic`.
+
+| model_id | input (cache miss) | input (cache hit) | output | context | notes |
+|----------|--------------------|--------------------|--------|---------|-------|
+| deepseek-v4-flash | ¥1.00 | ¥0.02 | ¥2.00 | 1M | max output 384K, concurrency 2500 |
+| deepseek-v4-pro | ¥3.00 | ¥0.025 | ¥6.00 | 1M | max output 384K, concurrency 500; 2.5折 (原价 ¥12 / ¥0.1 / ¥24) |
+
+> No separate cache_write fee. Both support thinking and non-thinking modes.
 
 ### Zhipu GLM (智谱)
 
-| model_id | official_name | input (CNY) | output (CNY) | cache_read (CNY) | context | notes |
-|----------|--------------|-------------|--------------|------------------|---------|-------|
-| glm-5.1 | glm-5.1 | ¥1.00 | ¥3.20 | ¥0.475 | 200K | latest flagship (2026-04) |
-| glm-5 | glm-5 | ¥0.80 | ¥2.40 | — | 200K | |
-| glm-5-code | glm-5-code | ¥1.50 | ¥5.60 | — | 128K | code specialist |
+All prices in CNY/MTok. Cache write: free (限时免费). Input length tiers: `[0, 32K)` / `[32K+)`.
 
-> 2026 cumulative price increase ~83%. Cache write pricing undisclosed.
+| model_id | input | output | cache_read | context | notes |
+|----------|-------|--------|------------|---------|-------|
+| glm-5.1 | ¥6 / ¥8 | ¥24 / ¥28 | ¥1.3 / ¥2 | 200K | latest flagship |
+| glm-5-turbo | ¥5 / ¥7 | ¥22 / ¥26 | ¥1.2 / ¥1.8 | 200K | |
+| glm-5 | ¥4 / ¥6 | ¥18 / ¥22 | ¥1 / ¥1.5 | 200K | |
+| glm-4.7 | ¥2–4 tiered | ¥8–16 tiered | ¥0.4–0.8 tiered | 200K | 3-tier by input+output length |
+| glm-4.5-air | ¥0.8–1.2 tiered | ¥2–8 tiered | ¥0.16–0.24 tiered | 128K | 3-tier by input+output length |
+| glm-4.7-flashx | ¥0.5 | ¥3 | ¥0.1 | 200K | budget with cache |
+| glm-4.7-flash | free | free | free | 200K | free tier |
+
+> glm-4.7 tiers: [0,32K)+[0,0.2K)out ¥2/¥8 → [0,32K)+[0.2K+)out ¥3/¥14 → [32K,200K) ¥4/¥16.
+> glm-4.5-air tiers: [0,32K)+[0,0.2K)out ¥0.8/¥2 → [0,32K)+[0.2K+)out ¥0.8/¥6 → [32K,128K) ¥1.2/¥8.
 
 ### Bailian / Qwen (阿里百炼)
 
-| model_id | official_name | input (CNY) | output (CNY) | cache_read (CNY) | context | notes |
-|----------|--------------|-------------|--------------|------------------|---------|-------|
-| qwen-max | qwen3.7-max | ¥12.00 | ¥36.00 | ¥1.20 | 256K | MoE, 2026-05-22, currently 50% off |
-| qwen-plus | qwen3.5-plus | ¥0.80 | ¥4.80 | ¥0.08 | ≤128K | best value |
-| qwen-coder | qwen-coder | ¥1.00 | ¥4.00 | ¥0.10 | 128K | code specialist |
-| qwen-flash | qwen3.5-flash | ¥0.20 | ¥0.80 | — | 128K | lowest cost |
+| model_id | official_name | input (CNY) | output (CNY) | cache_write (CNY) | cache_read (CNY) | context | notes |
+|----------|--------------|-------------|--------------|-------------------|------------------|---------|-------|
+| qwen3.7-max | qwen3.7-max | ¥6.00 | ¥18.00 | ¥7.50 | ¥1.20 | 256K | latest flagship, 50% off (原价 input ¥12 / output ¥36) |
+| qwen3.6-max | qwen3.6-max | ¥9.00 | ¥54.00 | ¥11.25 | ¥0.90 | 256K | preview, vibe coding specialist, max input 240K |
+| qwen3.6-plus | qwen3.6-plus | ¥2.00 | ¥12.00 | ¥2.50 | ¥0.20 | 1M | vision, thinking, function calling; snapshot `qwen3.6-plus-2026-04-02` |
+| qwen3.6-flash | qwen3.6-flash | ¥1.20 | ¥7.20 | ¥1.50 | ¥0.12 | 1M | vision, thinking, agentic coding, math reasoning |
+| qwen3.5-plus | qwen3.5-plus | ¥0.80 | ¥4.80 | ¥1.00 | ¥0.08 | 1M | vision, thinking; snapshot `qwen3.5-plus-2026-02-15` |
+| qwen3.5-flash | qwen3.5-flash | ¥0.20 | ¥2.00 | ¥0.25 | ¥0.02 | 1M | vision, thinking, fastest; Batch Chat 50% off |
 
-> Tiered pricing (above = ≤128K). Longer context doubles rate. Batch at 50% off.
+> qwen3.7-max: Batch File input ¥6 / output ¥18 per MTok. Tool calls: code_interpreter (free), web_search (¥4/千次), web_extractor (free).
+> qwen3.6-plus: Batch File input ¥1 / output ¥6. Batch Chat 50% off. Max input 991K (thinking 983K), max output 64K, thinking 80K. RPM 30000, TPM 5000000. Tool calls: web_search (¥4/千次), code_interpreter (free), web_extractor (free), i2i_search (¥48/千次), t2i_search (¥24/千次).
 
 ### Kimi (月之暗面)
 
 | model_id | official_name | input (CNY) | output (CNY) | cache_read (CNY) | context | notes |
 |----------|--------------|-------------|--------------|------------------|---------|-------|
-| kimi-k2 | kimi-k2 | ¥4.00 | ¥16.00 | ¥1.10 | 128K | cache_read ≈ 0.25× input |
-| kimi-k2-thinking | kimi-k2-thinking | ¥4.40 | ¥18.00 | ¥1.10 | 128K | thinking mode |
-| kimi-k2.6 | kimi-k2.6 | ¥6.50 | ¥27.00 | ¥1.10 | 128K | latest, ~58% price increase |
+| kimi-k2.6 | kimi-k2.6 | ¥6.50 | ¥27.00 | ¥1.10 | 256K | latest, ~58% price increase |
+| kimi-k2.5 | kimi-k2.5 | ¥4.00 | ¥21.00 | ¥0.70 | 256K | |
 
 ### MiniMax
 
-| model_id | official_name | input (CNY) | output (CNY) | cache_read (CNY) | context | notes |
-|----------|--------------|-------------|--------------|------------------|---------|-------|
-| minimax-m2.7 | minimax-m2.7 | ¥2.18 | ¥8.70 | ¥0.44 | 205K | output 1/21 of Claude Opus |
+| model_id | input | output | cache_read | cache_write | notes |
+|----------|-------|--------|------------|-------------|-------|
+| minimax-m2.7 | ¥2.10 | ¥8.40 | ¥0.42 | ¥2.625 | base |
+| minimax-m2.7-highspeed | ¥4.20 | ¥16.80 | ¥0.42 | ¥2.625 | 2× price for faster response |
+| minimax-m2.5 | ¥2.10 | ¥8.40 | ¥0.21 | ¥2.625 | previous gen, same base price |
+| minimax-m2.5-highspeed | ¥4.20 | ¥16.80 | ¥0.21 | ¥2.625 | |
 
-> Also offers Coding Plan subscription ¥99/month.
+> All prices CNY/MTok. Also offers Coding Plan subscription ¥99/month.
 
-### DouBao (字节豆包)
-
-| model_id | official_name | input (CNY) | output (CNY) | cache_read (CNY) | context | notes |
-|----------|--------------|-------------|--------------|------------------|---------|-------|
-| doubao-seed-1.8 | doubao-seed-1.8 | ¥0.80 | ¥8.00 | ¥0.16 | 128K | cache_read = 0.2× input |
-| doubao-seed-code | doubao-seed-2.0-code | ¥3.20 | ¥16.00 | — | 128K | code specialist |
-| doubao-seed-lite | doubao-seed-2.0-lite | ¥0.60 | ¥3.60 | — | 128K | lightweight |
-
-> Tiered pricing (above = ≤32K input + >200 output). Deployed on Volcano Engine. 120T daily token volume.
-
-### StepFun (阶跃星辰)
-
-| model_id | official_name | input (CNY) | output (CNY) | notes |
-|----------|--------------|-------------|--------------|-------|
-| stepfun-step-plan | step-3 | ¥2.00 | ¥8.00 | Coding Plan bundle |
 
 ---
 

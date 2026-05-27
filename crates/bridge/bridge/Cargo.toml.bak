@@ -1,0 +1,30 @@
+[package]
+name = "agent-proxy-rust-bridge"
+description = "Protocol translation bridge middleware for agent-proxy-rust"
+categories = ["development-tools"]
+keywords = ["protocol", "bridge", "translation", "llm"]
+version.workspace = true
+authors.workspace = true
+edition.workspace = true
+license.workspace = true
+documentation.workspace = true
+repository.workspace = true
+homepage.workspace = true
+
+[dependencies]
+agent-proxy-rust-core = { workspace = true }
+anyhow = { workspace = true }
+async-trait = "0.1"
+bytes = "1"
+serde = { workspace = true }
+serde_json = { workspace = true }
+tracing = { workspace = true }
+llm-bridge-core = { path = "../../../llm-bridge-rust/crates/core" }
+
+[dev-dependencies]
+http = "1"
+rstest = { workspace = true }
+tokio = { workspace = true }
+
+[lints]
+workspace = true

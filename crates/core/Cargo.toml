@@ -1,10 +1,8 @@
 [package]
 name = "agent-proxy-rust-core"
-description = """
-
-"""
+description = "Core middleware trait, axum server engine, upstream forwarding, and auth for agent-proxy"
 categories = ["development-tools"]
-keywords = []
+keywords = ["ai", "proxy", "middleware", "llm"]
 version.workspace = true
 authors.workspace = true
 edition.workspace = true
@@ -14,10 +12,28 @@ repository.workspace = true
 homepage.workspace = true
 
 [dependencies]
-serde.workspace = true
-serde_json.workspace = true
-thiserror.workspace = true
-tokio.workspace = true
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+tokio = { workspace = true, features = ["sync", "net", "time", "rt"] }
+tracing = { workspace = true }
+anyhow = { workspace = true }
+
+axum = { version = "0.8", features = ["macros"] }
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "stream"] }
+async-trait = "0.1"
+bytes = "1"
+http = "1"
+tower = { version = "0.5", features = ["util"] }
+tower-http = { version = "0.6", features = ["limit"] }
+secrecy = { version = "0.10", features = ["serde"] }
+uuid = { version = "1", features = ["v4", "fast-rng"] }
+futures = "0.3"
+pin-project-lite = "0.2"
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["rt", "rt-multi-thread", "macros", "sync", "net"] }
+tower = { version = "0.5", features = ["util"] }
 
 [lints]
 workspace = true

@@ -55,7 +55,9 @@ In memory, the master key and all decrypted API keys are wrapped in `secrecy::Se
 
 ## Proxy Authentication
 
-The proxy itself can require authentication via `proxy_api_key`:
+The proxy itself can require authentication via `proxy_api_key` or a role-based key mapping:
+
+### Simple Mode (single key)
 
 ```rust
 struct ProxyConfig {
@@ -65,6 +67,30 @@ struct ProxyConfig {
     proxy_token: Option<SecretString>,
 }
 ```
+
+### Role Mapping Mode (Ruflo Swarm)
+
+For Ruflo swarm deployments, each role gets its own proxy key. The key serves dual purpose: auth + role identification (see `0004-cost-tracking.md §Role Detection`).
+
+```yaml
+# config.yaml
+proxy_auth:
+  keys:
+    sk-proxy-architect: { role: architect }
+    sk-proxy-coder:     { role: coder }
+    sk-proxy-tester:    { role: tester }
+    sk-proxy-reviewer:  { role: reviewer }
+```
+
+The auth layer:
+
+1. Reads `x-api-key` (Anthropic) or `Authorization: Bearer` (OpenAI) from the request.
+2. Looks up the key in `proxy_auth.keys`.
+3. If found → extracts `role` → injects into `ConnectionContext.agent_role`.
+4. If not found → returns `401 Unauthorized` (when auth is enabled).
+5. Replaces the client-facing key with the real upstream channel API key before forwarding.
+
+No custom headers required — every AI agent client already sends its API key. The proxy reuses this existing header, then swaps to the real channel key for upstream.
 
 Authentication check happens in a Tower layer before any middleware runs:
 

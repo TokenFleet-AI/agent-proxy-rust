@@ -47,6 +47,9 @@ struct ProxyResponse {
 struct ConnectionContext {
     request_id: u64,
     agent_type: AgentType,         // Claude / Codex / Gemini / Unknown
+    agent_role: Option<String>,    // Ruflo swarm role (architect/coder/tester/...)
+                                   // Set by auth layer from x-api-key → role_mapping.
+                                   // None for standalone / non-Ruflo usage.
     detected_format: ApiFormat,    // from path
     started_at: Instant,
     target_protocol: Option<ApiFormat>,  // set by model-router middleware

@@ -1,0 +1,42 @@
+channels:
+  - id: "ch-001"
+    name: "primary-anthropic"
+    url: "http://localhost:9140"
+    protocol: "anthropic_messages"
+    api_key: "test-key-primary"
+    is_builtin: false
+    enabled: true
+    models:
+      - client_name: "claude-sonnet-4-6"
+        upstream_name: "claude-sonnet-4-6"
+        billing: "metered"
+        weight: 10
+        enabled: true
+
+  - id: "ch-002"
+    name: "backup-openai"
+    url: "http://localhost:9141"
+    protocol: "openai_chat"
+    api_key: "test-key-backup"
+    is_builtin: false
+    enabled: true
+    models:
+      - client_name: "gpt-5"
+        upstream_name: "gpt-5"
+        billing: "metered"
+        weight: 10
+        enabled: true
+
+  - id: "ch-003"
+    name: "unhealthy-channel"
+    url: "http://localhost:9142"
+    protocol: "anthropic_messages"
+    api_key: "test-key-bad"
+    is_builtin: false
+    enabled: false
+    models:
+      - client_name: "claude-sonnet-4-6"
+        upstream_name: "claude-sonnet-4-6"
+        billing: "metered"
+        weight: 5
+        enabled: false

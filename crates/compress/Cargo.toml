@@ -1,0 +1,23 @@
+[package]
+name = "agent-proxy-rust-compress"
+description = "Token compression middleware wrapping tokenless-schema"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+
+[dependencies]
+agent-proxy-rust-core = { path = "../core" }
+tokenless-schema = { path = "../../../tokenless/crates/tokenless-schema" }
+async-trait = "0.1"
+bytes = "1"
+serde_json = { workspace = true }
+tracing = { workspace = true }
+
+[dev-dependencies]
+http = "1"
+tokio = { workspace = true, features = ["macros", "rt"] }
+
+[lints]
+workspace = true
