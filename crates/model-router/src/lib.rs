@@ -54,6 +54,8 @@ struct ResolvedMapping {
 /// Lightweight mapping info stored in the context extension.
 #[derive(Debug, Clone)]
 pub struct SelectedMappingInfo {
+    /// Channel ID for cost tracking.
+    pub channel_id: String,
     /// Model mapping ID for quota tracking.
     pub mapping_id: String,
     /// Client-facing model name.
@@ -85,7 +87,7 @@ impl ModelRouterMiddleware {
     /// has an unrecognized protocol string.
     pub async fn from_storage(storage: Arc<dyn Storage>) -> Result<Self, ProxyError> {
         let storage_channels = storage
-            .list_channels()
+            .list_channels(None)
             .await
             .map_err(|e| ProxyError::Internal(e.into()))?;
 
@@ -125,7 +127,7 @@ impl ModelRouterMiddleware {
             channels.push(ResolvedChannel {
                 channel_id: ch.id,
                 channel_name: ch.name,
-                url: ch.url,
+                url: ch.base_url,
                 api_key: ch.api_key.expose_secret().to_owned(),
                 protocol,
                 enabled: ch.enabled,
@@ -327,6 +329,7 @@ impl ProxyMiddleware for ModelRouterMiddleware {
         ctx.insert(
             EXT_SELECTED_MAPPING,
             SelectedMappingInfo {
+                channel_id: channel.channel_id.clone(),
                 mapping_id: mapping.mapping_id.clone(),
                 client_name: mapping.client_name.clone(),
                 upstream_name: mapping.upstream_name.clone(),

@@ -1,6 +1,27 @@
-use chrono::{DateTime, Utc};
 use secrecy::{ExposeSecret, SecretString};
 use serde::{Deserialize, Serialize};
+
+/// An upstream AI provider (e.g. "Anthropic", "`OpenAI`").
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Provider {
+    /// Unique provider identifier.
+    pub id: String,
+    /// Human-readable name (e.g. "Anthropic").
+    pub name: String,
+}
+
+/// A model offered by a provider.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Model {
+    /// Unique model identifier.
+    pub id: String,
+    /// Provider this model belongs to.
+    pub provider_id: String,
+    /// Client-facing model name.
+    pub client_name: String,
+    /// Default pricing currency.
+    pub currency: String,
+}
 
 /// An upstream AI provider channel with its API key and protocol.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -10,24 +31,37 @@ pub struct Channel {
     /// Human-readable name (e.g. "Anthropic Official").
     pub name: String,
     /// Base URL of the upstream API.
-    pub url: String,
+    pub base_url: String,
     /// API key for authenticating with the upstream.
     #[serde(
         serialize_with = "serialize_secret",
         deserialize_with = "deserialize_secret"
     )]
     pub api_key: SecretString,
-    /// Protocol spoken by the upstream: `"anthropic_messages"`, `"openai_chat"`, or
-    /// `"openai_responses"`.
+    /// Protocol spoken by the upstream.
     pub protocol: String,
-    /// Whether this channel was seeded by the system (cannot be deleted).
+    /// Whether this channel was seeded by the system.
     pub is_builtin: bool,
     /// Whether this channel is active.
     pub enabled: bool,
-    /// When the channel was first created.
-    pub created_at: DateTime<Utc>,
-    /// When the channel was last modified.
-    pub updated_at: DateTime<Utc>,
+    /// When the channel was first created (unix timestamp).
+    pub created_at: i64,
+    /// When the channel was last modified (unix timestamp).
+    pub updated_at: i64,
+    /// Current health status: "Healthy", "Degraded", or "Cooldown".
+    pub health_status: String,
+    /// If in cooldown, when it ends (RFC 3339).
+    pub cooldown_until: Option<String>,
+    /// Number of consecutive failures.
+    pub consecutive_failures: u32,
+    /// Billing type: "Metered" or "`FlatFee`".
+    pub billing_type: String,
+    /// Monthly request quota (if applicable).
+    pub monthly_quota: Option<u64>,
+    /// Quota exhaustion policy: "fallback" or "block".
+    pub quota_policy: String,
+    /// Channel priority for weighted selection.
+    pub priority: u32,
 }
 
 /// Maps a client-facing model name to an upstream model name with pricing.
@@ -54,46 +88,44 @@ pub struct ModelMapping {
 /// A single proxied request with token usage and cost.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CostRecord {
-    /// Auto-increment primary key.
-    pub id: i64,
-    /// When the request was completed.
-    pub timestamp: DateTime<Utc>,
-    /// Git user.name or OS username.
-    pub user_name: String,
-    /// Absolute path of the project directory.
-    pub project_path: String,
-    /// Project name extracted from git remote or directory name.
-    pub project_name: String,
-    /// Agent type: "claude", "codex", "gemini", etc.
+    /// UUID v7 primary key.
+    pub id: String,
+    /// Channel used for this request.
+    pub channel_id: String,
+    /// Project path or identifier.
+    pub project: String,
+    /// User who made the request.
+    pub user_id: String,
+    /// Agent type: "`ClaudeCode`", "Codex", etc.
     pub agent_type: String,
-    /// Ruflo swarm role (architect, coder, tester, ...), if detected from API key mapping.
-    pub agent_role: Option<String>,
-    /// Channel display name.
-    pub channel_name: String,
-    /// "metered" or "subscription".
-    pub channel_kind: String,
-    /// Client-facing model name.
-    pub model_name: String,
     /// Input/prompt tokens consumed.
-    pub input_tokens: u64,
+    pub input_tokens: i64,
     /// Output/completion tokens consumed.
-    pub output_tokens: u64,
+    pub output_tokens: i64,
     /// Tokens written to the provider's prompt cache.
-    pub cache_write_tokens: u64,
+    pub cache_write_tokens: i64,
     /// Tokens read from the provider's prompt cache.
-    pub cache_read_tokens: u64,
+    pub cache_read_tokens: i64,
     /// Extended thinking tokens consumed.
-    pub thinking_tokens: u64,
+    pub thinking_tokens: i64,
     /// Actual monetary cost of this request.
-    pub actual_cost: f64,
-    /// Currency of `actual_cost`: "USD", "CNY", "credits".
-    pub unit: String,
+    pub cost: f64,
+    /// Tokens saved by schema compression.
+    pub schema_saved_tokens: i64,
+    /// Tokens saved by response compression.
+    pub response_saved_tokens: i64,
+    /// Tokens saved by RTK token optimization.
+    pub rtk_saved_tokens: i64,
     /// Token count before tokenless compression.
-    pub pre_compress_tokens: u64,
+    pub pre_compress_tokens: i64,
     /// Token count after tokenless compression.
-    pub post_compress_tokens: u64,
+    pub post_compress_tokens: i64,
     /// Tokens saved by tokenless compression.
-    pub compression_tokens_saved: u64,
+    pub compression_tokens_saved: i64,
+    /// Currency of `cost`: "USD", "CNY", "credits".
+    pub unit: String,
+    /// When the request was completed (RFC 3339).
+    pub timestamp: String,
 }
 
 /// A monthly subscription fee for a flat-fee channel.
@@ -109,6 +141,23 @@ pub struct SubscriptionFee {
     pub monthly_price: f64,
     /// Currency code (e.g. "USD").
     pub currency: String,
+}
+
+/// A switch/redirect event between channels.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SwitchLog {
+    /// UUID primary key.
+    pub id: String,
+    /// Channel that traffic was switched from.
+    pub from_channel_id: String,
+    /// Channel that traffic was switched to.
+    pub to_channel_id: String,
+    /// Reason for the switch.
+    pub reason: String,
+    /// Optional reference to a cost record at switch time.
+    pub cost_record_id: Option<String>,
+    /// When the switch occurred (RFC 3339).
+    pub created_at: String,
 }
 
 /// Optional filters for querying cost records.
@@ -132,9 +181,9 @@ pub struct CostFilter {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TimeRange {
     /// Start of the range (inclusive).
-    pub start: DateTime<Utc>,
+    pub start: i64,
     /// End of the range (exclusive).
-    pub end: DateTime<Utc>,
+    pub end: i64,
 }
 
 /// Grouping dimension for cost aggregation.
@@ -156,15 +205,15 @@ pub struct CostAggregate {
     /// The group key (depends on `CostGroupBy`).
     pub group_key: String,
     /// Sum of input tokens.
-    pub total_input_tokens: u64,
+    pub total_input_tokens: i64,
     /// Sum of output tokens.
-    pub total_output_tokens: u64,
+    pub total_output_tokens: i64,
     /// Sum of actual costs.
     pub total_actual_cost: f64,
     /// Sum of compression tokens saved.
-    pub total_compression_tokens_saved: u64,
+    pub total_compression_tokens_saved: i64,
     /// Number of requests in this group.
-    pub request_count: u64,
+    pub request_count: i64,
 }
 
 // ── Serde helpers for SecretString ────────────────────────────────

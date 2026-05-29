@@ -6,21 +6,23 @@
 #![forbid(unsafe_code)]
 #![warn(missing_docs, missing_debug_implementations)]
 
-use std::{fmt::Write, path::Path};
+use std::fmt::Write;
 
 use agent_proxy_rust_storage::{
-    Channel, CostAggregate, CostFilter, CostGroupBy, CostRecord, ModelMapping, Storage,
-    StorageError, SubscriptionFee, TimeRange,
+    Channel, CostAggregate, CostFilter, CostGroupBy, CostRecord, Model, ModelMapping, Provider,
+    Storage, StorageError, SubscriptionFee, SwitchLog, TimeRange,
 };
 use async_trait::async_trait;
-use chrono::{DateTime, TimeZone, Utc};
 use r2d2::Pool;
 use r2d2_sqlite::SqliteConnectionManager;
 use rusqlite::params;
 use secrecy::{ExposeSecret, SecretString};
 use tracing::debug;
 
-const MIGRATION_SQL: &str = include_str!("../migrations/001_init.sql");
+const MIGRATION_V1: &str = include_str!("../migrations/001_init.sql");
+const MIGRATION_V2: &str = include_str!("../migrations/002_health_fields.sql");
+const MIGRATION_V3: &str = include_str!("../migrations/003_savings_fields.sql");
+const MIGRATION_V4: &str = include_str!("../migrations/004_switch_logs_auth.sql");
 
 /// SQLite-backed storage implementation.
 ///
@@ -39,7 +41,7 @@ impl SqliteStorage {
     ///
     /// Returns [`StorageError::Connection`] if the database file cannot be
     /// opened or the pool cannot be created.
-    pub fn new(path: &Path) -> Result<Self, StorageError> {
+    pub fn new(path: &std::path::Path) -> Result<Self, StorageError> {
         let manager = SqliteConnectionManager::file(path);
         let pool = Pool::builder()
             .max_size(1)
@@ -67,43 +69,151 @@ impl SqliteStorage {
     }
 }
 
-// ── Helpers ────────────────────────────────────────────────────────────
-
-/// Safely converts a `u64` to `i64`, saturating at [`i64::MAX`].
-/// Token counts are non-negative and fit in `i64`; this is used for `SQLite` `INTEGER` columns.
-fn u64_to_i64(v: u64) -> i64 {
-    i64::try_from(v).unwrap_or(i64::MAX)
-}
-
-/// Safely converts an `i64` (from `SQLite`) to `u64`, clamping at 0.
-/// `SQLite` `INTEGER` columns for token counts are never negative.
-fn i64_to_u64(v: i64) -> u64 {
-    u64::try_from(v).unwrap_or(0)
-}
-
 impl SqliteStorage {
     fn now_unix() -> i64 {
-        Utc::now().timestamp()
-    }
-
-    fn unix_to_dt(ts: i64) -> DateTime<Utc> {
-        Utc.timestamp_opt(ts, 0).single().unwrap_or_else(|| {
-            Utc.timestamp_opt(0, 0)
-                .single()
-                .unwrap_or(DateTime::UNIX_EPOCH)
-        })
+        chrono::Utc::now().timestamp()
     }
 
     fn get_pool(&self) -> Pool<SqliteConnectionManager> {
         self.pool.clone()
     }
+
+    fn row_to_channel(row: &rusqlite::Row) -> rusqlite::Result<Channel> {
+        Ok(Channel {
+            id: row.get(0)?,
+            name: row.get(1)?,
+            base_url: row.get(2)?,
+            api_key: SecretString::new(row.get::<_, String>(3)?.into_boxed_str()),
+            protocol: row.get(4)?,
+            is_builtin: row.get(5)?,
+            enabled: row.get(6)?,
+            created_at: row.get(7)?,
+            updated_at: row.get(8)?,
+            health_status: row.get(9)?,
+            cooldown_until: row.get(10)?,
+            consecutive_failures: row.get(11)?,
+            billing_type: row.get(12)?,
+            monthly_quota: row.get(13)?,
+            quota_policy: row.get(14)?,
+            priority: row.get(15)?,
+        })
+    }
+
+    const CHANNEL_COLS: &'static str = "id, name, url, api_key, protocol, is_builtin, enabled, \
+                                        created_at, updated_at, health_status, cooldown_until, \
+                                        consecutive_failures, billing_type, monthly_quota, \
+                                        quota_policy, priority";
 }
 
 #[async_trait]
 impl Storage for SqliteStorage {
-    // ── Channel ────────────────────────────────────────────────────────
+    // ── Provider ────────────────────────────────────────────────────────
 
-    async fn list_channels(&self) -> Result<Vec<Channel>, StorageError> {
+    async fn list_providers(&self) -> Result<Vec<Provider>, StorageError> {
+        let pool = self.get_pool();
+        tokio::task::spawn_blocking(move || {
+            let conn = pool
+                .get()
+                .map_err(|e| StorageError::Connection(e.to_string()))?;
+            let mut stmt = conn
+                .prepare("SELECT id, name FROM providers ORDER BY id")
+                .map_err(|e| StorageError::Backend(e.to_string()))?;
+            let rows = stmt
+                .query_map([], |row| {
+                    Ok(Provider {
+                        id: row.get(0)?,
+                        name: row.get(1)?,
+                    })
+                })
+                .map_err(|e| StorageError::Backend(e.to_string()))?;
+            let mut providers = Vec::new();
+            for row in rows {
+                providers.push(row.map_err(|e| StorageError::Backend(e.to_string()))?);
+            }
+            Ok(providers)
+        })
+        .await
+        .map_err(|e| StorageError::Backend(format!("join error: {e}")))?
+    }
+
+    async fn get_provider(&self, id: &str) -> Result<Option<Provider>, StorageError> {
+        let id = id.to_string();
+        let pool = self.get_pool();
+        tokio::task::spawn_blocking(move || {
+            let conn = pool
+                .get()
+                .map_err(|e| StorageError::Connection(e.to_string()))?;
+            let mut stmt = conn
+                .prepare("SELECT id, name FROM providers WHERE id = ?1")
+                .map_err(|e| StorageError::Backend(e.to_string()))?;
+            let mut rows = stmt
+                .query_map(params![id], |row| {
+                    Ok(Provider {
+                        id: row.get(0)?,
+                        name: row.get(1)?,
+                    })
+                })
+                .map_err(|e| StorageError::Backend(e.to_string()))?;
+            match rows.next() {
+                Some(Ok(p)) => Ok(Some(p)),
+                Some(Err(e)) => Err(StorageError::Backend(e.to_string())),
+                None => Ok(None),
+            }
+        })
+        .await
+        .map_err(|e| StorageError::Backend(format!("join error: {e}")))?
+    }
+
+    // ── Model ──────────────────────────────────────────────────────────
+
+    async fn list_models(&self, provider_id: Option<&str>) -> Result<Vec<Model>, StorageError> {
+        let provider_id = provider_id.map(String::from);
+        let pool = self.get_pool();
+        tokio::task::spawn_blocking(move || {
+            let conn = pool
+                .get()
+                .map_err(|e| StorageError::Connection(e.to_string()))?;
+            let (sql, param_values): (&str, Vec<String>) = match &provider_id {
+                Some(pid) => (
+                    "SELECT DISTINCT id, channel_id, client_name, 'USD' FROM model_mappings WHERE \
+                     channel_id = ?1 ORDER BY id",
+                    vec![pid.clone()],
+                ),
+                None => (
+                    "SELECT DISTINCT id, channel_id, client_name, 'USD' FROM model_mappings ORDER \
+                     BY id",
+                    vec![],
+                ),
+            };
+            let mut stmt = conn
+                .prepare(sql)
+                .map_err(|e| StorageError::Backend(e.to_string()))?;
+            let params_refs: Vec<&dyn rusqlite::types::ToSql> = param_values
+                .iter()
+                .map(|s| s as &dyn rusqlite::types::ToSql)
+                .collect();
+            let rows = stmt
+                .query_map(params_refs.as_slice(), |row| {
+                    Ok(Model {
+                        id: row.get(0)?,
+                        provider_id: row.get(1)?,
+                        client_name: row.get(2)?,
+                        currency: row.get(3)?,
+                    })
+                })
+                .map_err(|e| StorageError::Backend(e.to_string()))?;
+            let mut models = Vec::new();
+            for row in rows {
+                models.push(row.map_err(|e| StorageError::Backend(e.to_string()))?);
+            }
+            Ok(models)
+        })
+        .await
+        .map_err(|e| StorageError::Backend(format!("join error: {e}")))?
+    }
+
+    async fn get_model(&self, id: &str) -> Result<Option<Model>, StorageError> {
+        let id = id.to_string();
         let pool = self.get_pool();
         tokio::task::spawn_blocking(move || {
             let conn = pool
@@ -111,25 +221,64 @@ impl Storage for SqliteStorage {
                 .map_err(|e| StorageError::Connection(e.to_string()))?;
             let mut stmt = conn
                 .prepare(
-                    "SELECT id, name, url, api_key, protocol, is_builtin, enabled, created_at, \
-                     updated_at
-                     FROM channels ORDER BY id",
+                    "SELECT id, channel_id, client_name, 'USD' FROM model_mappings WHERE id = ?1",
                 )
                 .map_err(|e| StorageError::Backend(e.to_string()))?;
-            let rows = stmt
-                .query_map([], |row| {
-                    Ok(Channel {
+            let mut rows = stmt
+                .query_map(params![id], |row| {
+                    Ok(Model {
                         id: row.get(0)?,
-                        name: row.get(1)?,
-                        url: row.get(2)?,
-                        api_key: SecretString::new(row.get::<_, String>(3)?.into_boxed_str()),
-                        protocol: row.get(4)?,
-                        is_builtin: row.get(5)?,
-                        enabled: row.get(6)?,
-                        created_at: Self::unix_to_dt(row.get(7)?),
-                        updated_at: Self::unix_to_dt(row.get(8)?),
+                        provider_id: row.get(1)?,
+                        client_name: row.get(2)?,
+                        currency: row.get(3)?,
                     })
                 })
+                .map_err(|e| StorageError::Backend(e.to_string()))?;
+            match rows.next() {
+                Some(Ok(m)) => Ok(Some(m)),
+                Some(Err(e)) => Err(StorageError::Backend(e.to_string())),
+                None => Ok(None),
+            }
+        })
+        .await
+        .map_err(|e| StorageError::Backend(format!("join error: {e}")))?
+    }
+
+    // ── Channel ────────────────────────────────────────────────────────
+
+    async fn list_channels(&self, model_id: Option<&str>) -> Result<Vec<Channel>, StorageError> {
+        let model_id = model_id.map(String::from);
+        let pool = self.get_pool();
+        tokio::task::spawn_blocking(move || {
+            let conn = pool
+                .get()
+                .map_err(|e| StorageError::Connection(e.to_string()))?;
+            let (sql, params_vec) = match &model_id {
+                Some(mid) => (
+                    format!(
+                        "SELECT {} FROM channels WHERE id IN (SELECT channel_id FROM \
+                         model_mappings WHERE client_name = ?1) ORDER BY id",
+                        SqliteStorage::CHANNEL_COLS
+                    ),
+                    vec![mid.clone()],
+                ),
+                None => (
+                    format!(
+                        "SELECT {} FROM channels ORDER BY id",
+                        SqliteStorage::CHANNEL_COLS
+                    ),
+                    vec![],
+                ),
+            };
+            let mut stmt = conn
+                .prepare(&sql)
+                .map_err(|e| StorageError::Backend(e.to_string()))?;
+            let params_refs: Vec<&dyn rusqlite::types::ToSql> = params_vec
+                .iter()
+                .map(|s| s as &dyn rusqlite::types::ToSql)
+                .collect();
+            let rows = stmt
+                .query_map(params_refs.as_slice(), SqliteStorage::row_to_channel)
                 .map_err(|e| StorageError::Backend(e.to_string()))?;
             let mut channels = Vec::new();
             for row in rows {
@@ -148,27 +297,15 @@ impl Storage for SqliteStorage {
             let conn = pool
                 .get()
                 .map_err(|e| StorageError::Connection(e.to_string()))?;
+            let sql = format!(
+                "SELECT {} FROM channels WHERE id = ?1",
+                SqliteStorage::CHANNEL_COLS
+            );
             let mut stmt = conn
-                .prepare(
-                    "SELECT id, name, url, api_key, protocol, is_builtin, enabled, created_at, \
-                     updated_at
-                     FROM channels WHERE id = ?1",
-                )
+                .prepare(&sql)
                 .map_err(|e| StorageError::Backend(e.to_string()))?;
             let mut rows = stmt
-                .query_map(params![id], |row| {
-                    Ok(Channel {
-                        id: row.get(0)?,
-                        name: row.get(1)?,
-                        url: row.get(2)?,
-                        api_key: SecretString::new(row.get::<_, String>(3)?.into_boxed_str()),
-                        protocol: row.get(4)?,
-                        is_builtin: row.get(5)?,
-                        enabled: row.get(6)?,
-                        created_at: Self::unix_to_dt(row.get(7)?),
-                        updated_at: Self::unix_to_dt(row.get(8)?),
-                    })
-                })
+                .query_map(params![id], SqliteStorage::row_to_channel)
                 .map_err(|e| StorageError::Backend(e.to_string()))?;
             match rows.next() {
                 Some(Ok(ch)) => Ok(Some(ch)),
@@ -183,12 +320,17 @@ impl Storage for SqliteStorage {
     async fn upsert_channel(&self, channel: &Channel) -> Result<(), StorageError> {
         let id = channel.id.clone();
         let name = channel.name.clone();
-        let url = channel.url.clone();
+        let url = channel.base_url.clone();
         let api_key = channel.api_key.expose_secret().to_string();
         let protocol = channel.protocol.clone();
         let is_builtin = channel.is_builtin;
         let enabled = channel.enabled;
         let now = Self::now_unix();
+        let health_status = channel.health_status.clone();
+        let billing_type = channel.billing_type.clone();
+        let monthly_quota = channel.monthly_quota;
+        let quota_policy = channel.quota_policy.clone();
+        let priority = channel.priority;
         let pool = self.get_pool();
 
         tokio::task::spawn_blocking(move || {
@@ -197,8 +339,9 @@ impl Storage for SqliteStorage {
                 .map_err(|e| StorageError::Connection(e.to_string()))?;
             conn.execute(
                 "INSERT INTO channels (id, name, url, api_key, protocol, is_builtin, enabled, \
-                 created_at, updated_at)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
+                 created_at, updated_at, health_status, billing_type, monthly_quota, \
+                 quota_policy, priority)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)
                  ON CONFLICT(id) DO UPDATE SET
                    name = excluded.name,
                    url = excluded.url,
@@ -206,9 +349,27 @@ impl Storage for SqliteStorage {
                    protocol = excluded.protocol,
                    is_builtin = excluded.is_builtin,
                    enabled = excluded.enabled,
-                   updated_at = excluded.updated_at",
+                   updated_at = excluded.updated_at,
+                   health_status = excluded.health_status,
+                   billing_type = excluded.billing_type,
+                   monthly_quota = excluded.monthly_quota,
+                   quota_policy = excluded.quota_policy,
+                   priority = excluded.priority",
                 params![
-                    id, name, url, api_key, protocol, is_builtin, enabled, now, now
+                    id,
+                    name,
+                    url,
+                    api_key,
+                    protocol,
+                    is_builtin,
+                    enabled,
+                    now,
+                    now,
+                    health_status,
+                    billing_type,
+                    monthly_quota,
+                    quota_policy,
+                    priority,
                 ],
             )
             .map_err(|e| StorageError::Backend(e.to_string()))?;
@@ -267,6 +428,86 @@ impl Storage for SqliteStorage {
         .map_err(|e| StorageError::Backend(format!("join error: {e}")))?
     }
 
+    async fn update_channel(
+        &self,
+        id: &str,
+        name: Option<&str>,
+        enabled: Option<bool>,
+        priority: Option<u32>,
+        monthly_quota: Option<u64>,
+        quota_policy: Option<&str>,
+    ) -> Result<Channel, StorageError> {
+        let id = id.to_string();
+        let name = name.map(String::from);
+        let quota_policy = quota_policy.map(String::from);
+        let now = Self::now_unix();
+        let pool = self.get_pool();
+
+        tokio::task::spawn_blocking(move || {
+            let conn = pool
+                .get()
+                .map_err(|e| StorageError::Connection(e.to_string()))?;
+
+            // Build SET clause dynamically
+            let mut sets = vec!["updated_at = ?1".to_string()];
+            let mut param_values: Vec<Box<dyn rusqlite::types::ToSql>> = vec![Box::new(now)];
+
+            if let Some(ref n) = name {
+                sets.push(format!("name = ?{}", param_values.len() + 1));
+                param_values.push(Box::new(n.clone()));
+            }
+            if let Some(e) = enabled {
+                sets.push(format!("enabled = ?{}", param_values.len() + 1));
+                param_values.push(Box::new(e));
+            }
+            if let Some(p) = priority {
+                sets.push(format!("priority = ?{}", param_values.len() + 1));
+                param_values.push(Box::new(p));
+            }
+            if let Some(q) = monthly_quota {
+                sets.push(format!("monthly_quota = ?{}", param_values.len() + 1));
+                param_values.push(Box::new(i64::try_from(q).unwrap_or(i64::MAX)));
+            }
+            if let Some(ref qp) = quota_policy {
+                sets.push(format!("quota_policy = ?{}", param_values.len() + 1));
+                param_values.push(Box::new(qp.clone()));
+            }
+
+            let id_param_idx = param_values.len() + 1;
+            param_values.push(Box::new(id.clone()));
+
+            let sql = format!(
+                "UPDATE channels SET {} WHERE id = ?{id_param_idx}",
+                sets.join(", "),
+            );
+
+            let params_refs: Vec<&dyn rusqlite::types::ToSql> =
+                param_values.iter().map(AsRef::as_ref).collect();
+
+            let rows = conn
+                .execute(&sql, params_refs.as_slice())
+                .map_err(|e| StorageError::Backend(e.to_string()))?;
+            if rows == 0 {
+                return Err(StorageError::NotFound(format!("channel not found: {id}")));
+            }
+
+            // Fetch updated channel
+            let channel_sql = format!(
+                "SELECT {} FROM channels WHERE id = ?1",
+                SqliteStorage::CHANNEL_COLS
+            );
+            let mut stmt = conn
+                .prepare(&channel_sql)
+                .map_err(|e| StorageError::Backend(e.to_string()))?;
+            let updated = stmt
+                .query_row(params![id], SqliteStorage::row_to_channel)
+                .map_err(|e| StorageError::Backend(e.to_string()))?;
+            Ok(updated)
+        })
+        .await
+        .map_err(|e| StorageError::Backend(format!("join error: {e}")))?
+    }
+
     async fn delete_channel(&self, id: &str) -> Result<(), StorageError> {
         let id = id.to_string();
         let pool = self.get_pool();
@@ -281,6 +522,92 @@ impl Storage for SqliteStorage {
             if rows == 0 {
                 return Err(StorageError::NotFound(format!("channel not found: {id}")));
             }
+            Ok(())
+        })
+        .await
+        .map_err(|e| StorageError::Backend(format!("join error: {e}")))?
+    }
+
+    async fn mark_channel_healthy(&self, id: &str) -> Result<(), StorageError> {
+        let id = id.to_string();
+        let now = Self::now_unix();
+        let pool = self.get_pool();
+
+        tokio::task::spawn_blocking(move || {
+            let conn = pool
+                .get()
+                .map_err(|e| StorageError::Connection(e.to_string()))?;
+            let rows = conn
+                .execute(
+                    "UPDATE channels SET health_status = 'Healthy', cooldown_until = NULL, \
+                     consecutive_failures = 0, updated_at = ?1 WHERE id = ?2",
+                    params![now, id],
+                )
+                .map_err(|e| StorageError::Backend(e.to_string()))?;
+            if rows == 0 {
+                return Err(StorageError::NotFound(format!("channel not found: {id}")));
+            }
+            Ok(())
+        })
+        .await
+        .map_err(|e| StorageError::Backend(format!("join error: {e}")))?
+    }
+
+    async fn record_channel_failure(&self, id: &str) -> Result<(), StorageError> {
+        let id = id.to_string();
+        let now = Self::now_unix();
+        let pool = self.get_pool();
+
+        tokio::task::spawn_blocking(move || {
+            let conn = pool
+                .get()
+                .map_err(|e| StorageError::Connection(e.to_string()))?;
+
+            // Atomically increment consecutive_failures and update health_status
+            conn.execute(
+                "UPDATE channels SET
+                   consecutive_failures = consecutive_failures + 1,
+                   updated_at = ?1
+                 WHERE id = ?2",
+                params![now, id],
+            )
+            .map_err(|e| StorageError::Backend(e.to_string()))?;
+
+            // Read back failures count to determine health status
+            let failures: i32 = conn
+                .query_row(
+                    "SELECT consecutive_failures FROM channels WHERE id = ?1",
+                    params![id],
+                    |row| row.get(0),
+                )
+                .map_err(|e| StorageError::Backend(e.to_string()))?;
+
+            let status = if failures >= 3 {
+                "Cooldown"
+            } else if failures >= 1 {
+                "Degraded"
+            } else {
+                "Healthy"
+            };
+
+            let cooldown_sql = if status == "Cooldown" {
+                format!(
+                    ", cooldown_until = '{}'",
+                    chrono::Utc::now()
+                        .checked_add_signed(chrono::Duration::minutes(5))
+                        .unwrap_or(chrono::Utc::now())
+                        .to_rfc3339()
+                )
+            } else {
+                String::new()
+            };
+
+            conn.execute(
+                &format!("UPDATE channels SET health_status = ?1 {cooldown_sql} WHERE id = ?2"),
+                params![status, id],
+            )
+            .map_err(|e| StorageError::Backend(e.to_string()))?;
+
             Ok(())
         })
         .await
@@ -367,7 +694,6 @@ impl Storage for SqliteStorage {
                 ],
             )
             .map_err(|e| {
-                // Check for foreign key constraint violation
                 let msg = e.to_string();
                 if msg.contains("FOREIGN KEY") {
                     StorageError::NotFound(format!("channel not found: {channel_id}"))
@@ -427,25 +753,25 @@ impl Storage for SqliteStorage {
     // ── Cost Records ───────────────────────────────────────────────────
 
     async fn insert_cost_record(&self, record: &CostRecord) -> Result<(), StorageError> {
-        let timestamp = record.timestamp.timestamp();
-        let user_name = record.user_name.clone();
-        let project_path = record.project_path.clone();
-        let project_name = record.project_name.clone();
+        let id = record.id.clone();
+        let channel_id = record.channel_id.clone();
+        let project = record.project.clone();
+        let user_id = record.user_id.clone();
         let agent_type = record.agent_type.clone();
-        let agent_role = record.agent_role.clone();
-        let channel_name = record.channel_name.clone();
-        let channel_kind = record.channel_kind.clone();
-        let model_name = record.model_name.clone();
-        let input_tokens = u64_to_i64(record.input_tokens);
-        let output_tokens = u64_to_i64(record.output_tokens);
-        let cache_write_tokens = u64_to_i64(record.cache_write_tokens);
-        let cache_read_tokens = u64_to_i64(record.cache_read_tokens);
-        let thinking_tokens = u64_to_i64(record.thinking_tokens);
-        let actual_cost = record.actual_cost;
+        let input_tokens = record.input_tokens;
+        let output_tokens = record.output_tokens;
+        let cache_write_tokens = record.cache_write_tokens;
+        let cache_read_tokens = record.cache_read_tokens;
+        let thinking_tokens = record.thinking_tokens;
+        let cost = record.cost;
+        let schema_saved_tokens = record.schema_saved_tokens;
+        let response_saved_tokens = record.response_saved_tokens;
+        let rtk_saved_tokens = record.rtk_saved_tokens;
+        let pre_compress_tokens = record.pre_compress_tokens;
+        let post_compress_tokens = record.post_compress_tokens;
+        let compression_tokens_saved = record.compression_tokens_saved;
         let unit = record.unit.clone();
-        let pre_compress_tokens = u64_to_i64(record.pre_compress_tokens);
-        let post_compress_tokens = u64_to_i64(record.post_compress_tokens);
-        let compression_tokens_saved = u64_to_i64(record.compression_tokens_saved);
+        let timestamp = record.timestamp.clone();
         let pool = self.get_pool();
 
         tokio::task::spawn_blocking(move || {
@@ -454,33 +780,33 @@ impl Storage for SqliteStorage {
                 .map_err(|e| StorageError::Connection(e.to_string()))?;
             conn.execute(
                 "INSERT INTO cost_records
-                 (timestamp, user_name, project_path, project_name, agent_type, agent_role, \
-                 channel_name, channel_kind, model_name,
-                  input_tokens, output_tokens, cache_write_tokens, cache_read_tokens, \
-                 thinking_tokens,
-                  actual_cost, unit, pre_compress_tokens, post_compress_tokens, \
-                 compression_tokens_saved)
+                 (id, channel_id, project, user_id, agent_type,
+                  input_tokens, output_tokens, cache_write_tokens, cache_read_tokens,
+                  thinking_tokens, cost,
+                  schema_saved_tokens, response_saved_tokens, rtk_saved_tokens,
+                  pre_compress_tokens, post_compress_tokens, compression_tokens_saved,
+                  unit, timestamp)
                  VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19)",
                 params![
-                    timestamp,
-                    user_name,
-                    project_path,
-                    project_name,
+                    id,
+                    channel_id,
+                    project,
+                    user_id,
                     agent_type,
-                    agent_role,
-                    channel_name,
-                    channel_kind,
-                    model_name,
                     input_tokens,
                     output_tokens,
                     cache_write_tokens,
                     cache_read_tokens,
                     thinking_tokens,
-                    actual_cost,
-                    unit,
+                    cost,
+                    schema_saved_tokens,
+                    response_saved_tokens,
+                    rtk_saved_tokens,
                     pre_compress_tokens,
                     post_compress_tokens,
                     compression_tokens_saved,
+                    unit,
+                    timestamp,
                 ],
             )
             .map_err(|e| StorageError::Backend(e.to_string()))?;
@@ -502,32 +828,32 @@ impl Storage for SqliteStorage {
                 .map_err(|e| StorageError::Connection(e.to_string()))?;
 
             let mut sql = String::from(
-                "SELECT id, timestamp, user_name, project_path, project_name, agent_type, \
-                 agent_role, channel_name, channel_kind, model_name,
-                        input_tokens, output_tokens, cache_write_tokens, cache_read_tokens, \
-                 thinking_tokens,
-                        actual_cost, unit, pre_compress_tokens, post_compress_tokens, \
-                 compression_tokens_saved
+                "SELECT id, channel_id, project, user_id, agent_type,
+                        input_tokens, output_tokens, cache_write_tokens, cache_read_tokens,
+                        thinking_tokens, cost,
+                        schema_saved_tokens, response_saved_tokens, rtk_saved_tokens,
+                        pre_compress_tokens, post_compress_tokens, compression_tokens_saved,
+                        unit, timestamp
                  FROM cost_records WHERE 1=1",
             );
             let mut param_values: Vec<Box<dyn rusqlite::types::ToSql>> = Vec::new();
 
             if let Some(project_path) = filter.project_path {
-                sql.push_str(" AND project_path = ?");
+                sql.push_str(" AND project = ?");
                 param_values.push(Box::new(project_path));
             }
             if let Some(model_name) = filter.model_name {
-                sql.push_str(" AND model_name = ?");
+                sql.push_str(" AND channel_id = ?");
                 param_values.push(Box::new(model_name));
             }
             if let Some(channel_name) = filter.channel_name {
-                sql.push_str(" AND channel_name = ?");
+                sql.push_str(" AND channel_id = ?");
                 param_values.push(Box::new(channel_name));
             }
             if let Some(ref tr) = filter.time_range {
                 sql.push_str(" AND timestamp >= ? AND timestamp < ?");
-                param_values.push(Box::new(tr.start.timestamp()));
-                param_values.push(Box::new(tr.end.timestamp()));
+                param_values.push(Box::new(tr.start.to_string()));
+                param_values.push(Box::new(tr.end.to_string()));
             }
 
             sql.push_str(" ORDER BY timestamp DESC");
@@ -548,25 +874,24 @@ impl Storage for SqliteStorage {
                 .query_map(params_refs.as_slice(), |row| {
                     Ok(CostRecord {
                         id: row.get(0)?,
-                        timestamp: Self::unix_to_dt(row.get::<_, i64>(1)?),
-                        user_name: row.get(2)?,
-                        project_path: row.get(3)?,
-                        project_name: row.get(4)?,
-                        agent_type: row.get(5)?,
-                        agent_role: row.get(6)?,
-                        channel_name: row.get(7)?,
-                        channel_kind: row.get(8)?,
-                        model_name: row.get(9)?,
-                        input_tokens: i64_to_u64(row.get::<_, i64>(10)?),
-                        output_tokens: i64_to_u64(row.get::<_, i64>(11)?),
-                        cache_write_tokens: i64_to_u64(row.get::<_, i64>(12)?),
-                        cache_read_tokens: i64_to_u64(row.get::<_, i64>(13)?),
-                        thinking_tokens: i64_to_u64(row.get::<_, i64>(14)?),
-                        actual_cost: row.get(15)?,
-                        unit: row.get(16)?,
-                        pre_compress_tokens: i64_to_u64(row.get::<_, i64>(17)?),
-                        post_compress_tokens: i64_to_u64(row.get::<_, i64>(18)?),
-                        compression_tokens_saved: i64_to_u64(row.get::<_, i64>(19)?),
+                        channel_id: row.get(1)?,
+                        project: row.get(2)?,
+                        user_id: row.get(3)?,
+                        agent_type: row.get(4)?,
+                        input_tokens: row.get(5)?,
+                        output_tokens: row.get(6)?,
+                        cache_write_tokens: row.get(7)?,
+                        cache_read_tokens: row.get(8)?,
+                        thinking_tokens: row.get(9)?,
+                        cost: row.get(10)?,
+                        schema_saved_tokens: row.get(11)?,
+                        response_saved_tokens: row.get(12)?,
+                        rtk_saved_tokens: row.get(13)?,
+                        pre_compress_tokens: row.get(14)?,
+                        post_compress_tokens: row.get(15)?,
+                        compression_tokens_saved: row.get(16)?,
+                        unit: row.get(17)?,
+                        timestamp: row.get(18)?,
                     })
                 })
                 .map_err(|e| StorageError::Backend(e.to_string()))?;
@@ -587,8 +912,8 @@ impl Storage for SqliteStorage {
         range: TimeRange,
     ) -> Result<Vec<CostAggregate>, StorageError> {
         let pool = self.get_pool();
-        let start_ts = range.start.timestamp();
-        let end_ts = range.end.timestamp();
+        let start_ts = range.start;
+        let end_ts = range.end;
 
         tokio::task::spawn_blocking(move || {
             let conn = pool
@@ -596,13 +921,11 @@ impl Storage for SqliteStorage {
                 .map_err(|e| StorageError::Connection(e.to_string()))?;
 
             let (group_key_expr, group_clause): (&str, &str) = match group_by {
-                CostGroupBy::Project => ("project_path", "project_path"),
-                CostGroupBy::Model => ("model_name", "model_name"),
-                CostGroupBy::Channel => ("channel_name", "channel_name"),
+                CostGroupBy::Project => ("project", "project"),
+                CostGroupBy::Model | CostGroupBy::Channel => ("channel_id", "channel_id"),
                 CostGroupBy::ProjectModelMonth => (
-                    "project_path || '|' || model_name || '|' || strftime('%Y-%m', \
-                     datetime(timestamp, 'unixepoch'))",
-                    "project_path, model_name, strftime('%Y-%m', datetime(timestamp, 'unixepoch'))",
+                    "project || '|' || channel_id || '|' || substr(timestamp, 1, 7)",
+                    "project, channel_id",
                 ),
             };
 
@@ -610,7 +933,7 @@ impl Storage for SqliteStorage {
                 "SELECT {group_key_expr} as group_key,
                         SUM(input_tokens) as total_input_tokens,
                         SUM(output_tokens) as total_output_tokens,
-                        SUM(actual_cost) as total_actual_cost,
+                        SUM(cost) as total_actual_cost,
                         SUM(compression_tokens_saved) as total_compression_tokens_saved,
                         COUNT(*) as request_count
                  FROM cost_records
@@ -623,14 +946,14 @@ impl Storage for SqliteStorage {
                 .prepare(&sql)
                 .map_err(|e| StorageError::Backend(e.to_string()))?;
             let rows = stmt
-                .query_map(params![start_ts, end_ts], |row| {
+                .query_map(params![start_ts.to_string(), end_ts.to_string()], |row| {
                     Ok(CostAggregate {
                         group_key: row.get(0)?,
-                        total_input_tokens: i64_to_u64(row.get::<_, i64>(1)?),
-                        total_output_tokens: i64_to_u64(row.get::<_, i64>(2)?),
+                        total_input_tokens: row.get(1)?,
+                        total_output_tokens: row.get(2)?,
                         total_actual_cost: row.get(3)?,
-                        total_compression_tokens_saved: i64_to_u64(row.get::<_, i64>(4)?),
-                        request_count: i64_to_u64(row.get::<_, i64>(5)?),
+                        total_compression_tokens_saved: row.get(4)?,
+                        request_count: row.get(5)?,
                     })
                 })
                 .map_err(|e| StorageError::Backend(e.to_string()))?;
@@ -647,12 +970,18 @@ impl Storage for SqliteStorage {
 
     async fn prune_cost_records(&self, older_than_days: u32) -> Result<u64, StorageError> {
         let pool = self.get_pool();
-        let cutoff = Utc::now().timestamp() - i64::from(older_than_days) * 86400;
 
         tokio::task::spawn_blocking(move || {
             let conn = pool
                 .get()
                 .map_err(|e| StorageError::Connection(e.to_string()))?;
+
+            // Parse cutoff: current time minus N days as RFC 3339 string comparison
+            let cutoff = chrono::Utc::now()
+                .checked_sub_signed(chrono::Duration::days(i64::from(older_than_days)))
+                .unwrap_or(chrono::Utc::now())
+                .to_rfc3339();
+
             let deleted = conn
                 .execute(
                     "DELETE FROM cost_records WHERE timestamp < ?1",
@@ -660,6 +989,41 @@ impl Storage for SqliteStorage {
                 )
                 .map_err(|e| StorageError::Backend(e.to_string()))?;
             Ok(deleted as u64)
+        })
+        .await
+        .map_err(|e| StorageError::Backend(format!("join error: {e}")))?
+    }
+
+    // ── Switch Log ─────────────────────────────────────────────────────
+
+    async fn insert_switch_log(&self, log: &SwitchLog) -> Result<(), StorageError> {
+        let id = log.id.clone();
+        let from_channel_id = log.from_channel_id.clone();
+        let to_channel_id = log.to_channel_id.clone();
+        let reason = log.reason.clone();
+        let cost_record_id = log.cost_record_id.clone();
+        let created_at = log.created_at.clone();
+        let pool = self.get_pool();
+
+        tokio::task::spawn_blocking(move || {
+            let conn = pool
+                .get()
+                .map_err(|e| StorageError::Connection(e.to_string()))?;
+            conn.execute(
+                "INSERT INTO switch_logs (id, from_channel_id, to_channel_id, reason, \
+                 cost_record_id, created_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                params![
+                    id,
+                    from_channel_id,
+                    to_channel_id,
+                    reason,
+                    cost_record_id,
+                    created_at
+                ],
+            )
+            .map_err(|e| StorageError::Backend(e.to_string()))?;
+            Ok(())
         })
         .await
         .map_err(|e| StorageError::Backend(format!("join error: {e}")))?
@@ -760,7 +1124,6 @@ impl Storage for SqliteStorage {
 
     async fn migrate(&self) -> Result<(), StorageError> {
         let pool = self.get_pool();
-        let sql = MIGRATION_SQL.to_string();
 
         tokio::task::spawn_blocking(move || {
             let conn = pool
@@ -773,11 +1136,23 @@ impl Storage for SqliteStorage {
                 .unwrap_or(0);
 
             if version < 1 {
-                conn.execute_batch(&sql)
-                    .map_err(|e| StorageError::Migration(e.to_string()))?;
-                conn.pragma_update(None, "user_version", 1)
+                conn.execute_batch(MIGRATION_V1)
                     .map_err(|e| StorageError::Migration(e.to_string()))?;
             }
+            if version < 2 {
+                conn.execute_batch(MIGRATION_V2)
+                    .map_err(|e| StorageError::Migration(e.to_string()))?;
+            }
+            if version < 3 {
+                conn.execute_batch(MIGRATION_V3)
+                    .map_err(|e| StorageError::Migration(e.to_string()))?;
+            }
+            if version < 4 {
+                conn.execute_batch(MIGRATION_V4)
+                    .map_err(|e| StorageError::Migration(e.to_string()))?;
+            }
+            conn.pragma_update(None, "user_version", 4)
+                .map_err(|e| StorageError::Migration(e.to_string()))?;
 
             Ok(())
         })

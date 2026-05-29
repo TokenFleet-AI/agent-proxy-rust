@@ -16,21 +16,37 @@ use async_trait::async_trait;
 pub use error::StorageError;
 use secrecy::SecretString;
 pub use types::{
-    Channel, CostAggregate, CostFilter, CostGroupBy, CostRecord, ModelMapping, SubscriptionFee,
-    TimeRange,
+    Channel, CostAggregate, CostFilter, CostGroupBy, CostRecord, Model, ModelMapping, Provider,
+    SubscriptionFee, SwitchLog, TimeRange,
 };
 
-/// Backend-agnostic storage for channels, cost records, and subscription fees.
+/// Backend-agnostic storage for providers, models, channels, and cost records.
 ///
 /// Every method except [`max_connections`](Self::max_connections) is async and
 /// returns `Result<T, StorageError>`. Implementations must be `Send + Sync`
 /// so the trait object can be shared across Tokio tasks behind an `Arc`.
 #[async_trait]
 pub trait Storage: Send + Sync + Debug {
+    // ── Provider ────────────────────────────────────────────
+
+    /// List all providers.
+    async fn list_providers(&self) -> Result<Vec<Provider>, StorageError>;
+
+    /// Get a single provider by ID.
+    async fn get_provider(&self, id: &str) -> Result<Option<Provider>, StorageError>;
+
+    // ── Model ───────────────────────────────────────────────
+
+    /// List models, optionally filtered by provider.
+    async fn list_models(&self, provider_id: Option<&str>) -> Result<Vec<Model>, StorageError>;
+
+    /// Get a single model by ID.
+    async fn get_model(&self, id: &str) -> Result<Option<Model>, StorageError>;
+
     // ── Channel ─────────────────────────────────────────────
 
-    /// List all channels.
-    async fn list_channels(&self) -> Result<Vec<Channel>, StorageError>;
+    /// List all channels, optionally filtered by model ID.
+    async fn list_channels(&self, model_id: Option<&str>) -> Result<Vec<Channel>, StorageError>;
 
     /// Get a single channel by ID.
     async fn get_channel(&self, id: &str) -> Result<Option<Channel>, StorageError>;
@@ -44,8 +60,25 @@ pub trait Storage: Send + Sync + Debug {
     /// Update just the API key for a channel.
     async fn set_channel_api_key(&self, id: &str, key: &SecretString) -> Result<(), StorageError>;
 
+    /// Update channel fields (name, enabled, priority, quota).
+    async fn update_channel(
+        &self,
+        id: &str,
+        name: Option<&str>,
+        enabled: Option<bool>,
+        priority: Option<u32>,
+        monthly_quota: Option<u64>,
+        quota_policy: Option<&str>,
+    ) -> Result<Channel, StorageError>;
+
     /// Delete a channel and its model mappings (cascade).
     async fn delete_channel(&self, id: &str) -> Result<(), StorageError>;
+
+    /// Mark a channel as healthy (reset failures).
+    async fn mark_channel_healthy(&self, id: &str) -> Result<(), StorageError>;
+
+    /// Record a channel failure (increments counter, may set Degraded/Cooldown).
+    async fn record_channel_failure(&self, id: &str) -> Result<(), StorageError>;
 
     // ── Model Mapping ───────────────────────────────────────
 
@@ -80,6 +113,11 @@ pub trait Storage: Send + Sync + Debug {
     /// Delete records older than N days, returning the count of deleted rows.
     async fn prune_cost_records(&self, older_than_days: u32) -> Result<u64, StorageError>;
 
+    // ── Switch Log ──────────────────────────────────────────
+
+    /// Record a channel switch event.
+    async fn insert_switch_log(&self, log: &SwitchLog) -> Result<(), StorageError>;
+
     // ── Subscription Fees ───────────────────────────────────
 
     /// Record a monthly subscription fee.
@@ -101,6 +139,5 @@ pub trait Storage: Send + Sync + Debug {
     async fn health_check(&self) -> Result<bool, StorageError>;
 
     /// Maximum number of concurrent connections this backend supports.
-    /// `SQLite` returns 1; `PostgreSQL` returns pool size.
     fn max_connections(&self) -> usize;
 }

@@ -1,0 +1,266 @@
+{
+  "model": "claude-sonnet-4-6",
+  "max_tokens": 4096,
+  "messages": [
+    {
+      "role": "user",
+      "content": "Analyze the data using available tools."
+    }
+  ],
+  "tools": [
+    {
+      "name": "get_weather",
+      "description": "Get the current weather for a given city. Returns temperature in Celsius, humidity percentage, wind speed, and general conditions description. The city name must be a valid ISO-recognized city name in English.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "city": {
+            "type": "string",
+            "description": "The city name to get weather for, e.g. 'Tokyo', 'London', 'New York'"
+          },
+          "units": {
+            "type": "string",
+            "enum": ["celsius", "fahrenheit"],
+            "description": "Temperature unit system to use"
+          }
+        },
+        "required": ["city"]
+      }
+    },
+    {
+      "name": "search_documents",
+      "description": "Search through the company knowledge base for documents matching the given query. Uses semantic search to find the most relevant documents. Supports filtering by document type, date range, and author.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "query": {
+            "type": "string",
+            "description": "Natural language search query"
+          },
+          "max_results": {
+            "type": "integer",
+            "description": "Maximum number of results to return (1-50)",
+            "default": 10
+          },
+          "doc_type": {
+            "type": "string",
+            "enum": ["report", "memo", "specification", "email", "all"],
+            "description": "Filter by document type"
+          },
+          "date_from": {
+            "type": "string",
+            "description": "Start date in ISO 8601 format (YYYY-MM-DD)"
+          },
+          "date_to": {
+            "type": "string",
+            "description": "End date in ISO 8601 format (YYYY-MM-DD)"
+          },
+          "author": {
+            "type": "string",
+            "description": "Filter by document author username"
+          }
+        },
+        "required": ["query"]
+      }
+    },
+    {
+      "name": "calculate_metrics",
+      "description": "Perform statistical calculations on a provided dataset. Supports mean, median, standard deviation, percentiles, and correlation analysis. Input data can be provided as a JSON array of numbers or key-value pairs.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "data": {
+            "type": "array",
+            "items": { "type": "number" },
+            "description": "Array of numeric values to compute metrics for"
+          },
+          "metrics": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "enum": ["mean", "median", "stddev", "min", "max", "p25", "p75", "p95", "correlation"]
+            },
+            "description": "List of metrics to compute"
+          },
+          "group_by": {
+            "type": "string",
+            "description": "Optional categorical column for grouped statistics"
+          }
+        },
+        "required": ["data", "metrics"]
+      }
+    },
+    {
+      "name": "send_notification",
+      "description": "Send a notification to specified channels. Supports email, Slack, and webhook delivery. Message content supports Markdown formatting.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "channel": {
+            "type": "string",
+            "enum": ["email", "slack", "webhook"],
+            "description": "Delivery channel for the notification"
+          },
+          "recipient": {
+            "type": "string",
+            "description": "Recipient email address, Slack channel ID, or webhook URL"
+          },
+          "subject": {
+            "type": "string",
+            "description": "Notification subject line (email only)"
+          },
+          "body": {
+            "type": "string",
+            "description": "Notification body content in Markdown format"
+          },
+          "priority": {
+            "type": "string",
+            "enum": ["low", "normal", "high", "urgent"],
+            "description": "Notification priority level"
+          }
+        },
+        "required": ["channel", "recipient", "body"]
+      }
+    },
+    {
+      "name": "query_database",
+      "description": "Execute a read-only SQL query against the analytics database. Supports SELECT statements with JOINs, aggregations, and window functions. Results are returned as a JSON array of row objects.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "query": {
+            "type": "string",
+            "description": "SQL SELECT query to execute"
+          },
+          "timeout_ms": {
+            "type": "integer",
+            "description": "Query timeout in milliseconds (1000-30000)",
+            "default": 5000
+          },
+          "max_rows": {
+            "type": "integer",
+            "description": "Maximum number of rows to return (1-10000)",
+            "default": 1000
+          },
+          "format": {
+            "type": "string",
+            "enum": ["json", "csv", "parquet"],
+            "description": "Output format for results"
+          }
+        },
+        "required": ["query"]
+      }
+    },
+    {
+      "name": "create_schedule",
+      "description": "Create a scheduled task or recurring event. Supports one-time and recurring schedules with cron expressions. Can trigger webhooks, send notifications, or run reports.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "name": {
+            "type": "string",
+            "description": "Human-readable name for the scheduled task"
+          },
+          "cron": {
+            "type": "string",
+            "description": "Cron expression for the schedule (e.g., '0 9 * * 1-5')"
+          },
+          "action": {
+            "type": "object",
+            "description": "The action to perform on schedule trigger",
+            "properties": {
+              "type": {
+                "type": "string",
+                "enum": ["webhook", "notification", "report", "script"],
+                "description": "Type of action to execute"
+              },
+              "config": {
+                "type": "object",
+                "description": "Action-specific configuration parameters"
+              }
+            },
+            "required": ["type"]
+          },
+          "timezone": {
+            "type": "string",
+            "description": "IANA timezone name (e.g., 'America/New_York')",
+            "default": "UTC"
+          }
+        },
+        "required": ["name", "cron", "action"]
+      }
+    },
+    {
+      "name": "analyze_sentiment",
+      "description": "Analyze the sentiment of given text using NLP models. Returns sentiment scores (positive, negative, neutral), confidence levels, and detected entities. Supports multiple languages.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "text": {
+            "type": "string",
+            "description": "Text content to analyze for sentiment"
+          },
+          "language": {
+            "type": "string",
+            "description": "ISO 639-1 language code for the input text",
+            "default": "en"
+          },
+          "entity_extraction": {
+            "type": "boolean",
+            "description": "Whether to also extract named entities",
+            "default": false
+          }
+        },
+        "required": ["text"]
+      }
+    },
+    {
+      "name": "generate_chart",
+      "description": "Generate a chart or visualization from provided data. Supports line charts, bar charts, pie charts, scatter plots, and heatmaps. Output can be PNG, SVG, or interactive HTML.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "chart_type": {
+            "type": "string",
+            "enum": ["line", "bar", "pie", "scatter", "heatmap", "area"],
+            "description": "Type of chart to generate"
+          },
+          "data": {
+            "type": "array",
+            "description": "Data series for the chart"
+          },
+          "title": {
+            "type": "string",
+            "description": "Chart title"
+          },
+          "x_label": {
+            "type": "string",
+            "description": "Label for X axis"
+          },
+          "y_label": {
+            "type": "string",
+            "description": "Label for Y axis"
+          },
+          "output_format": {
+            "type": "string",
+            "enum": ["png", "svg", "html"],
+            "description": "Output file format"
+          },
+          "width": {
+            "type": "integer",
+            "description": "Chart width in pixels"
+          },
+          "height": {
+            "type": "integer",
+            "description": "Chart height in pixels"
+          },
+          "color_scheme": {
+            "type": "string",
+            "description": "Named color scheme for the chart"
+          }
+        },
+        "required": ["chart_type", "data", "title"]
+      }
+    }
+  ]
+}

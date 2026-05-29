@@ -1,0 +1,31 @@
+[package]
+name = "agent-proxy-e2e-tests"
+description = "E2E integration tests for agent-proxy-rust"
+version.workspace = true
+authors.workspace = true
+edition.workspace = true
+license.workspace = true
+publish = false
+
+[dependencies]
+serde_json.workspace = true
+serde = { version = "1.0", features = ["derive"] }
+
+[dev-dependencies]
+anyhow.workspace = true
+tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
+wiremock = "0.6"
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+
+[lints.rust]
+unsafe_code = "forbid"
+missing_docs = "warn"
+missing_debug_implementations = "warn"
+
+[lints.clippy]
+expect_used = "allow"
+unwrap_used = "allow"
+panic = "allow"
+todo = "warn"
+pedantic = "warn"
+missing_panics_doc = "allow"

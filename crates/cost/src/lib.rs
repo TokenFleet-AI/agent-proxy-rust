@@ -14,7 +14,8 @@
 #![warn(missing_docs, missing_debug_implementations)]
 // u64 → f64 conversion is inherent to token cost calculation;
 // 1,000,000 tokens at $3/MTok = $3 — precision loss is negligible.
-#![allow(clippy::cast_precision_loss)]
+// u64 → i64 is safe because token values fit comfortably in i64.
+#![allow(clippy::cast_precision_loss, clippy::cast_possible_wrap)]
 
 use std::sync::Arc;
 
@@ -51,7 +52,6 @@ pub struct CostMiddleware {
     storage: Arc<dyn Storage>,
     user_name: String,
     project_path: String,
-    project_name: String,
     agent_type: String,
 }
 
@@ -62,47 +62,37 @@ impl CostMiddleware {
         storage: Arc<dyn Storage>,
         user_name: String,
         project_path: String,
-        project_name: String,
         agent_type: String,
     ) -> Self {
         Self {
             storage,
             user_name,
             project_path,
-            project_name,
             agent_type,
         }
     }
 
     /// Records a cost entry for the completed request.
     ///
-    /// Reads the selected channel, mapping, and compression stats from the
-    /// connection context, extracts usage from the response body, calculates
-    /// cost, and writes a [`CostRecord`] to storage.
-    ///
     /// # Errors
     ///
-    /// Returns `ProxyError` if the storage write fails.
+    /// Returns `ProxyError` if the storage backend write fails.
     pub async fn record(
         &self,
         ctx: &ConnectionContext,
         response_body: &serde_json::Value,
     ) -> Result<(), ProxyError> {
-        let channel_config = ctx.get::<ChannelConfig>(EXT_SELECTED_CHANNEL);
+        let _channel_config = ctx.get::<ChannelConfig>(EXT_SELECTED_CHANNEL);
         let mapping_info = ctx.get::<SelectedMappingInfo>(EXT_SELECTED_MAPPING);
         let stats = ctx.get::<serde_json::Value>(EXT_STATS_RECORD);
 
-        let channel_name = channel_config.map_or("unknown", |c| &c.name);
-        let model_name = mapping_info.map_or("unknown", |m| &m.client_name);
+        let channel_id = mapping_info.map_or(String::new(), |m| m.channel_id.clone());
 
         let usage = extract_usage(response_body, ctx.target_protocol);
 
-        // Flat-fee channels have zero per-request cost; metered channels
-        // have their cost calculated from the pricing model. Without full
-        // billing info in the extension, we default to zero.
         let (actual_cost, unit) = match mapping_info {
             Some(m) if m.is_flat_fee => (0.0, "USD"),
-            _ => (0.0, "USD"), // Default: zero cost
+            _ => (0.0, "USD"),
         };
 
         let pre_compress = stats
@@ -115,33 +105,26 @@ impl CostMiddleware {
             .unwrap_or(0);
         let compression_saved = pre_compress.saturating_sub(post_compress);
 
-        let channel_kind = if mapping_info.is_some_and(|m| m.is_flat_fee) {
-            "subscription"
-        } else {
-            "metered"
-        };
-
         let record = CostRecord {
-            id: 0,
-            timestamp: Utc::now(),
-            user_name: self.user_name.clone(),
-            project_path: self.project_path.clone(),
-            project_name: self.project_name.clone(),
+            id: uuid::Uuid::now_v7().to_string(),
+            channel_id,
+            project: self.project_path.clone(),
+            user_id: self.user_name.clone(),
             agent_type: self.agent_type.clone(),
-            agent_role: ctx.agent_role.clone(),
-            channel_name: channel_name.to_owned(),
-            channel_kind: channel_kind.to_owned(),
-            model_name: model_name.to_owned(),
-            input_tokens: usage.input_tokens,
-            output_tokens: usage.output_tokens,
-            cache_write_tokens: usage.cache_write_tokens,
-            cache_read_tokens: usage.cache_read_tokens,
-            thinking_tokens: usage.thinking_tokens,
-            actual_cost,
+            input_tokens: usage.input_tokens as i64,
+            output_tokens: usage.output_tokens as i64,
+            cache_write_tokens: usage.cache_write_tokens as i64,
+            cache_read_tokens: usage.cache_read_tokens as i64,
+            thinking_tokens: usage.thinking_tokens as i64,
+            cost: actual_cost,
+            schema_saved_tokens: 0,
+            response_saved_tokens: 0,
+            rtk_saved_tokens: 0,
+            pre_compress_tokens: pre_compress as i64,
+            post_compress_tokens: post_compress as i64,
+            compression_tokens_saved: compression_saved as i64,
             unit: unit.to_owned(),
-            pre_compress_tokens: pre_compress,
-            post_compress_tokens: post_compress,
-            compression_tokens_saved: compression_saved,
+            timestamp: Utc::now().to_rfc3339(),
         };
 
         self.storage

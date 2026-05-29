@@ -72,6 +72,24 @@ impl AgentProxy {
         AgentProxyBuilder::default()
     }
 
+    /// Returns the axum [`Router`] for this proxy without starting a server.
+    /// Useful for combining with other routers (e.g., admin API).
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ProxyError::Config`] if the reqwest client cannot be built
+    /// from the proxy configuration.
+    pub fn into_router(self) -> Result<Router, ProxyError> {
+        let client = build_reqwest_client(&self.config)?;
+        let state = Arc::new(ProxyState {
+            config: Arc::new(self.config),
+            middlewares: self.middlewares,
+            client,
+            next_request_id: Arc::new(AtomicU64::new(1)),
+        });
+        Ok(build_router(state))
+    }
+
     /// Starts the proxy server and returns a [`JoinHandle`].
     ///
     /// Runs `on_init` on all middlewares before binding.
