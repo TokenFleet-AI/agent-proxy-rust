@@ -3,15 +3,20 @@ use serde::{Deserialize, Serialize};
 
 /// An upstream AI provider (e.g. "Anthropic", "`OpenAI`").
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct Provider {
     /// Unique provider identifier.
     pub id: String,
     /// Human-readable name (e.g. "Anthropic").
     pub name: String,
+    /// When the provider was added (RFC 3339).
+    #[serde(default)]
+    pub created_at: String,
 }
 
 /// A model offered by a provider.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct Model {
     /// Unique model identifier.
     pub id: String,
@@ -19,12 +24,24 @@ pub struct Model {
     pub provider_id: String,
     /// Client-facing model name.
     pub client_name: String,
+    /// Input price per 1M tokens.
+    pub price_input: f64,
+    /// Output price per 1M tokens.
+    pub price_output: f64,
     /// Default pricing currency.
     pub currency: String,
+    /// Maximum context window in tokens.
+    pub context_window: i64,
+    /// When the model was added (RFC 3339).
+    pub created_at: String,
+    /// Number of channels that can serve this model.
+    #[serde(default)]
+    pub channel_count: u32,
 }
 
 /// An upstream AI provider channel with its API key and protocol.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct Channel {
     /// Unique channel identifier (e.g. "anthropic-official").
     pub id: String,
@@ -34,12 +51,15 @@ pub struct Channel {
     pub base_url: String,
     /// API key for authenticating with the upstream.
     #[serde(
+        rename = "apiKeyRef",
         serialize_with = "serialize_secret",
         deserialize_with = "deserialize_secret"
     )]
     pub api_key: SecretString,
-    /// Protocol spoken by the upstream.
+    /// Protocol spoken by the upstream (default).
     pub protocol: String,
+    /// Supported protocols JSON: [{"protocol":"...","path":"..."}].
+    pub protocols: String,
     /// Whether this channel was seeded by the system.
     pub is_builtin: bool,
     /// Whether this channel is active.
@@ -66,6 +86,7 @@ pub struct Channel {
 
 /// Maps a client-facing model name to an upstream model name with pricing.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct ModelMapping {
     /// Unique mapping identifier.
     pub id: String,
@@ -124,8 +145,42 @@ pub struct CostRecord {
     pub compression_tokens_saved: i64,
     /// Currency of `cost`: "USD", "CNY", "credits".
     pub unit: String,
+    /// Serialized pricing snapshot for audit trail.
+    #[serde(default)]
+    pub pricing_snapshot_json: String,
     /// When the request was completed (RFC 3339).
     pub timestamp: String,
+    /// Session ID from `X-Claude-Code-Session-Id` header (for billing correlation).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session_id: Option<String>,
+    /// Estimated tokens before any compression (tokenless + proxy layers).
+    #[serde(default)]
+    pub before_tokens: i64,
+    /// Actual tokens consumed by the upstream API (input + output).
+    #[serde(default)]
+    pub after_tokens: i64,
+    /// Total tokens saved across all compression layers.
+    #[serde(default)]
+    pub tokens_saved: i64,
+    /// JSON array breakdown of each compression operation.
+    ///
+    /// Each element:
+    /// ```json
+    /// {
+    ///   "op": "compress-schema",      // opType — see report.rs for full enum
+    ///   "method": "ToonHrv",          // compression strategy
+    ///   "beforeTokens": 1500,
+    ///   "afterTokens": 700,
+    ///   "savedTokens": 800,
+    ///   "beforeBytes": 6000,
+    ///   "afterBytes": 2800,
+    ///   "savedBytes": 3200
+    /// }
+    /// ```
+    ///
+    /// See [`crate::report`] module docs for the complete opType / method lookup table.
+    #[serde(default)]
+    pub compression_breakdown_json: String,
 }
 
 /// A monthly subscription fee for a flat-fee channel.

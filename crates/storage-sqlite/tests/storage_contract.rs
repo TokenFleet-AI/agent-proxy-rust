@@ -23,9 +23,9 @@ async fn test_list_providers_after_migration() {
         .list_providers()
         .await
         .expect("list_providers failed");
-    assert_eq!(providers.len(), 7, "should have 7 seed providers");
-    let anthropic = providers.iter().find(|p| p.name == "Anthropic").unwrap();
-    assert_eq!(anthropic.id, "019a0000-0000-7000-0000-000000000001");
+    assert_eq!(providers.len(), 5, "should have 7 seed providers");
+    let deepseek = providers.iter().find(|p| p.name == "DeepSeek").unwrap();
+    assert_eq!(deepseek.id, "deepseek");
 }
 
 #[tokio::test]
@@ -33,11 +33,11 @@ async fn test_list_providers_after_migration() {
 async fn test_get_provider_exists() {
     let storage = setup().await;
     let result = storage
-        .get_provider("019a0000-0000-7000-0000-000000000001")
+        .get_provider("deepseek")
         .await
         .expect("get_provider failed");
     assert!(result.is_some());
-    assert_eq!(result.unwrap().name, "Anthropic");
+    assert_eq!(result.unwrap().name, "DeepSeek");
 }
 
 #[tokio::test]
@@ -58,20 +58,19 @@ async fn test_get_provider_not_found() {
 async fn test_list_models_all() {
     let storage = setup().await;
     let models = storage.list_models(None).await.expect("list_models failed");
-    assert!(models.len() >= 21, "should have at least 21 seed models");
+    assert_eq!(models.len(), 15, "should have 15 seed models");
 }
 
 #[tokio::test]
 #[serial]
 async fn test_list_models_filtered_by_provider() {
     let storage = setup().await;
-    // Filter by channel id (providers share channel namespace in V1 schema)
     let models = storage
-        .list_models(Some("anthropic-official"))
+        .list_models(Some("deepseek"))
         .await
         .expect("list_models failed");
-    assert_eq!(models.len(), 3);
-    assert!(models.iter().all(|m| m.provider_id == "anthropic-official"));
+    assert_eq!(models.len(), 2); // deepseek has 2 models
+    assert!(models.iter().all(|m| m.provider_id == "deepseek"));
 }
 
 #[tokio::test]
@@ -79,12 +78,12 @@ async fn test_list_models_filtered_by_provider() {
 async fn test_get_model_exists() {
     let storage = setup().await;
     let model = storage
-        .get_model("anthropic-official:claude-sonnet-4-6")
+        .get_model("deepseek:deepseek-v4-pro")
         .await
         .expect("get_model failed")
         .unwrap();
-    assert_eq!(model.client_name, "claude-sonnet-4-6");
-    assert_eq!(model.currency, "USD");
+    assert_eq!(model.client_name, "deepseek-v4-pro");
+    assert_eq!(model.currency, "CNY");
 }
 
 // ── Channel ───────────────────────────────────────────────────────────────────
@@ -97,7 +96,7 @@ async fn test_list_channels_all() {
         .list_channels(None)
         .await
         .expect("list_channels failed");
-    assert_eq!(channels.len(), 13, "should have 13 seed channels");
+    assert_eq!(channels.len(), 7, "should have 7 seed channels");
 }
 
 #[tokio::test]
@@ -105,12 +104,12 @@ async fn test_list_channels_all() {
 async fn test_get_channel_fields() {
     let storage = setup().await;
     let channel = storage
-        .get_channel("anthropic-official")
+        .get_channel("deepseek")
         .await
         .expect("get_channel failed")
         .unwrap();
-    assert_eq!(channel.name, "Anthropic Official");
-    assert_eq!(channel.base_url, "https://api.anthropic.com");
+    assert_eq!(channel.name, "DeepSeek Official");
+    assert_eq!(channel.base_url, "https://api.deepseek.com");
     assert_eq!(channel.billing_type, "metered");
     assert_eq!(channel.health_status, "Healthy");
     assert!(channel.enabled);
@@ -125,8 +124,8 @@ async fn test_list_channels_filtered_by_model() {
         .await
         .expect("list_channels failed");
     assert!(
-        channels.len() >= 4,
-        "qwen3.5-plus should have at least 4 channels"
+        channels.len() >= 2,
+        "qwen3.5-plus should have at least 2 channels"
     );
 }
 
@@ -136,7 +135,7 @@ async fn test_update_channel() {
     let storage = setup().await;
     let updated = storage
         .update_channel(
-            "anthropic-official",
+            "deepseek",
             Some("Updated Name"),
             None,
             Some(99),
@@ -156,14 +155,10 @@ async fn test_update_channel() {
 async fn test_mark_channel_healthy() {
     let storage = setup().await;
     storage
-        .mark_channel_healthy("anthropic-official")
+        .mark_channel_healthy("deepseek")
         .await
         .expect("mark_channel_healthy failed");
-    let channel = storage
-        .get_channel("anthropic-official")
-        .await
-        .unwrap()
-        .unwrap();
+    let channel = storage.get_channel("deepseek").await.unwrap().unwrap();
     assert_eq!(channel.health_status, "Healthy");
     assert_eq!(channel.consecutive_failures, 0);
 }
@@ -173,32 +168,15 @@ async fn test_mark_channel_healthy() {
 async fn test_record_channel_failure_sequence() {
     let storage = setup().await;
     // 1st failure → Degraded
-    storage
-        .record_channel_failure("anthropic-official")
-        .await
-        .unwrap();
-    let ch = storage
-        .get_channel("anthropic-official")
-        .await
-        .unwrap()
-        .unwrap();
+    storage.record_channel_failure("deepseek").await.unwrap();
+    let ch = storage.get_channel("deepseek").await.unwrap().unwrap();
     assert_eq!(ch.health_status, "Degraded");
     assert_eq!(ch.consecutive_failures, 1);
 
     // 2 more failures → Cooldown
-    storage
-        .record_channel_failure("anthropic-official")
-        .await
-        .unwrap();
-    storage
-        .record_channel_failure("anthropic-official")
-        .await
-        .unwrap();
-    let ch = storage
-        .get_channel("anthropic-official")
-        .await
-        .unwrap()
-        .unwrap();
+    storage.record_channel_failure("deepseek").await.unwrap();
+    storage.record_channel_failure("deepseek").await.unwrap();
+    let ch = storage.get_channel("deepseek").await.unwrap().unwrap();
     assert_eq!(ch.health_status, "Cooldown");
     assert_eq!(ch.consecutive_failures, 3);
 }
@@ -208,16 +186,10 @@ async fn test_record_channel_failure_sequence() {
 async fn test_delete_channel() {
     let storage = setup().await;
     storage
-        .delete_channel("anthropic-official")
+        .delete_channel("deepseek")
         .await
         .expect("delete failed");
-    assert!(
-        storage
-            .get_channel("anthropic-official")
-            .await
-            .unwrap()
-            .is_none()
-    );
+    assert!(storage.get_channel("deepseek").await.unwrap().is_none());
 }
 
 // ── Cost Record ───────────────────────────────────────────────────────────────
@@ -228,7 +200,7 @@ async fn test_insert_and_query_cost_records() {
     let storage = setup().await;
     let record = CostRecord {
         id: uuid::Uuid::now_v7().to_string(),
-        channel_id: "anthropic-official".into(),
+        channel_id: "deepseek".into(),
         project: "/test/project".into(),
         user_id: "test-user".into(),
         agent_type: "ClaudeCode".into(),
@@ -245,7 +217,13 @@ async fn test_insert_and_query_cost_records() {
         post_compress_tokens: 1400,
         compression_tokens_saved: 100,
         unit: "USD".into(),
+        pricing_snapshot_json: String::new(),
         timestamp: Utc::now().to_rfc3339(),
+        session_id: Some("sess-test-001".into()),
+        before_tokens: 1500,
+        after_tokens: 1500,
+        tokens_saved: 100,
+        compression_breakdown_json: String::new(),
     };
     storage
         .insert_cost_record(&record)
@@ -274,8 +252,8 @@ async fn test_insert_switch_log() {
     let storage = setup().await;
     let log = SwitchLog {
         id: uuid::Uuid::now_v7().to_string(),
-        from_channel_id: "anthropic-official".into(),
-        to_channel_id: "openai-official".into(),
+        from_channel_id: "deepseek".into(),
+        to_channel_id: "glm-official".into(),
         reason: "health check failed".into(),
         cost_record_id: None,
         created_at: Utc::now().to_rfc3339(),
@@ -321,8 +299,8 @@ async fn test_health_check_returns_true() {
 
 #[tokio::test]
 #[serial]
-async fn test_max_connections_is_one() {
-    assert_eq!(setup().await.max_connections(), 1);
+async fn test_max_connections_is_four() {
+    assert_eq!(setup().await.max_connections(), 4);
 }
 
 #[tokio::test]
@@ -331,5 +309,5 @@ async fn test_migrate_is_idempotent() {
     let storage = setup().await;
     storage.migrate().await.expect("second migrate failed");
     let channels = storage.list_channels(None).await.unwrap();
-    assert_eq!(channels.len(), 13, "seed data must not be duplicated");
+    assert_eq!(channels.len(), 7, "seed data must not be duplicated");
 }

@@ -18,6 +18,11 @@ Agent (Claude Code / Codex / Gemini CLI / ...)
 │  ├── body size limit (16MB)                          │
 │  └── input validation                                │
 │                                                      │
+│  Session correlation                                 │
+│  ├── 读 X-Claude-Code-Session-Id header              │
+│  ├── rename-then-read 消费 tokenless report 文件     │
+│  └── 注入 ctx: session_id, tokenless_saved_tokens    │
+│                                                      │
 │  on_request 链 (注册顺序)                             │
 │  ├── ① CompressMiddleware    schema 瘦身 60-70%      │
 │  ├── ② ModelRouterMiddleware 选通道 + 模型名映射     │
@@ -96,20 +101,28 @@ SSE 流返回...
   ModelRouterMiddleware: 记录 Healthy + latency
   CompressMiddleware: 流式 → 跳过 ResponseCompressor
 
-CostMiddleware
-  读 ctx["selected_channel"] → Anthropic Official
-  读 ctx["stats_record"] → pre=12000, post=4500, saved=7500
+CostRecorder (after on_response chain, NOT in middleware)
+  读 ctx.session_id → "sess_abc" (from X-Claude-Code-Session-Id header)
+  读 ctx.tokenless_saved_tokens → 950 (from report file via rename-then-read)
+  读 ctx.tokenless_breakdown_json → [{"op":"CompressSchema","method":"ToonHrv","saved":800},...]
+  读 ctx.extensions["compression_stats"] → proxy_schema_saved=7500
+  读 ctx.extensions["selected_mapping"] → pricing
   读 response usage → input=1450, output=380
 
   calc_cost:
     (1450/1M × $3.00) + (380/1M × $15.00) = $0.01005
+  total_saved = tokenless_saved(950) + proxy_saved(7500) = 8450
+  before_tokens = after(1830) + total_saved(8450) = 10280 (估算)
 
   INSERT INTO cost_records (
-    project_path, project_name, agent_type,
-    channel_name, model_name,
-    input_tokens, output_tokens,
-    actual_cost, unit,
+    project, user_id, agent_type,
+    channel_id,
+    input_tokens, output_tokens, cache_write_tokens, cache_read_tokens, thinking_tokens,
+    cost, unit,
+    schema_saved_tokens, response_saved_tokens, rtk_saved_tokens,
     pre_compress_tokens, post_compress_tokens, compression_tokens_saved,
+    pricing_snapshot_json,
+    session_id, before_tokens, after_tokens, tokens_saved, compression_breakdown_json,
     timestamp
   )
 ```

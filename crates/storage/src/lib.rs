@@ -94,6 +94,9 @@ pub trait Storage: Send + Sync + Debug {
     /// Delete a model mapping.
     async fn delete_mapping(&self, id: &str) -> Result<(), StorageError>;
 
+    /// List all model mappings.
+    async fn list_all_mappings(&self) -> Result<Vec<ModelMapping>, StorageError>;
+
     // ── Cost Records ────────────────────────────────────────
 
     /// Record a completed request.

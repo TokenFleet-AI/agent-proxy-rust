@@ -22,8 +22,13 @@ pub struct ProxyConfig {
     pub listen: SocketAddr,
     /// Maximum request body size in bytes (default 16 MB).
     pub max_body_size: usize,
-    /// Timeout for upstream HTTP requests.
-    pub upstream_timeout: Duration,
+    /// Per-read timeout for upstream HTTP responses.
+    ///
+    /// This is the maximum idle time between successive socket reads, **not**
+    /// the total request duration. A single read that takes longer than this
+    /// will fail, but long-running streaming responses (SSE) are fine as long
+    /// as the upstream sends data within this window.
+    pub upstream_read_timeout: Duration,
     /// Timeout for establishing upstream TCP connections.
     pub upstream_connect_timeout: Duration,
     /// Optional simple auth key (check `Authorization: Bearer <key>`).
@@ -39,7 +44,7 @@ impl Default for ProxyConfig {
         Self {
             listen: SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 8787),
             max_body_size: 16 * 1024 * 1024, // 16 MB
-            upstream_timeout: Duration::from_secs(30),
+            upstream_read_timeout: Duration::from_secs(600),
             upstream_connect_timeout: Duration::from_secs(10),
             proxy_api_key: None,
             proxy_token: None,
@@ -76,7 +81,7 @@ mod tests {
     fn test_default_config_values() {
         let config = ProxyConfig::default();
         assert_eq!(config.max_body_size, 16 * 1024 * 1024);
-        assert_eq!(config.upstream_timeout, Duration::from_secs(30));
+        assert_eq!(config.upstream_read_timeout, Duration::from_secs(600));
         assert_eq!(config.upstream_connect_timeout, Duration::from_secs(10));
         assert!(!config.has_auth());
     }

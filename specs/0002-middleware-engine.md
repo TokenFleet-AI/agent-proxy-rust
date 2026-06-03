@@ -85,10 +85,10 @@ Via `ConnectionContext.extensions`:
 
 ```rust
 // CompressMiddleware writes:
-ctx.extensions.insert("stats_record", StatsRecord { ... });
+ctx.extensions.insert("stats_record", CompressionStats { ... });
 
 // CostMiddleware reads:
-let record = ctx.extensions.get::<StatsRecord>("stats_record");
+let record = ctx.extensions.get::<CompressionStats>("stats_record");
 
 // ModelRouterMiddleware writes:
 ctx.extensions.insert("selected_channel", channel);

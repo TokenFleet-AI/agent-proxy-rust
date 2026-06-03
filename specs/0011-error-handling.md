@@ -203,7 +203,7 @@ The proxy should NEVER pass raw upstream error bodies to the client — they may
 Compression is a best-effort optimization. Compression failures are logged and the request proceeds uncompressed:
 
 ```rust
-fn compress_or_passthrough(req: &mut ProxyRequest, compressor: &Compressor) -> StatsRecord {
+fn compress_or_passthrough(req: &mut ProxyRequest, compressor: &Compressor) -> CompressionStats {
     match compressor.compress(req) {
         Ok(stats) => stats,
         Err(e) => {
@@ -211,7 +211,7 @@ fn compress_or_passthrough(req: &mut ProxyRequest, compressor: &Compressor) -> S
                 error = %e,
                 "compression failed, passing through uncompressed"
             );
-            StatsRecord::default()  // pre=0, post=0, saved=0
+            CompressionStats::default()  // pre=0, post=0, saved=0
         }
     }
 }

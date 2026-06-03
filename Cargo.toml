@@ -29,6 +29,11 @@ agent-proxy-rust-storage = { path = "crates/storage" }
 agent-proxy-rust-model-router = { path = "crates/model-router" }
 agent-proxy-rust-cost = { path = "crates/cost" }
 agent-proxy-rust-storage-sqlite = { path = "crates/storage-sqlite" }
+agent-proxy-rust-bridge = { path = "crates/bridge" }
+agent-proxy-rust-compress = { path = "crates/compress" }
+
+# External protocol translation
+llm-bridge-core = { path = "../llm-bridge-rust/crates/core" }
 
 [workspace.lints.rust]
 unsafe_code = "forbid"

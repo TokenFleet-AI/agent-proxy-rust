@@ -16,6 +16,9 @@
 | 0012 | [testing-strategy](0012-testing-strategy.md) | 151 tests, E2E wiremock | fuzz, CI matrix | in-progress | Unit/integration/E2E/property tests; fuzz pending |
 | 0013 | [rate-limiting](0013-rate-limiting.md) | — | cloud extension | draft | Client/project/channel token buckets, fairness |
 | 0014 | [storage-abstraction](0014-storage-abstraction.md) | SQLite trait + 46 tests | PostgreSQL impl | done | Pluggable Storage trait, SqliteStorage, 13 channels + 65 mappings seed |
+| 0015 | [health-state-machine](0015-health-state-machine.md) | full | — | in-progress | Channel health: Degraded/Cooldown state machine, failure counting |
+| 0016 | [admin-api-extension](0016-admin-api-extension.md) | full | — | done | Admin API: channels, providers, models, mappings CRUD |
+| 0017 | [stats-reporting](0017-stats-reporting.md) | — | cloud extension | draft | 请求完成后回传消耗/压缩统计到 tokenless |
 
 ## Phase Strategy
 

@@ -84,11 +84,11 @@ async fn main() -> Result<()> {
             // axum server on config.listen and await shutdown signal.
             tracing::info!("server would start here (core axum engine not yet ready)");
             tracing::info!(
-                "loaded config: listen={}, data_dir={}, max_body_size={}, upstream_timeout={}s",
+                "loaded config: listen={}, data_dir={}, max_body_size={}, upstream_read_timeout={}s",
                 cfg.listen,
                 cfg.data_dir.display(),
                 cfg.max_body_size,
-                cfg.upstream_timeout
+                cfg.upstream_read_timeout
             );
             tracing::info!("agent-proxy shutting down");
         }

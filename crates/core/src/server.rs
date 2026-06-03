@@ -19,12 +19,14 @@ use axum::{
 use tokio::task::JoinHandle;
 use tower_http::limit::RequestBodyLimitLayer;
 
+use secrecy::ExposeSecret;
+
 use crate::{
     auth::{self, AgentRole, AuthState},
     config::ProxyConfig,
     error::ProxyError,
-    middleware::{ProxyMiddleware, run_on_request_chain, run_on_response_chain},
-    types::{ApiFormat, ConnectionContext, ProxyRequest, ProxyResponse, detect_agent_type},
+    middleware::{CostRecorder, ProxyMiddleware, run_on_request_chain, run_on_response_chain},
+    types::{ConnectionContext, ProxyRequest, ProxyResponse, detect_agent_type, detect_api_format},
 };
 
 /// Shared state for the proxy server.
@@ -36,6 +38,8 @@ pub struct ProxyState {
     pub middlewares: Arc<Vec<Box<dyn ProxyMiddleware>>>,
     /// Reusable HTTP client for upstream forwarding.
     pub client: reqwest::Client,
+    /// Optional cost recorder for post-response billing.
+    pub cost_recorder: Option<Arc<dyn CostRecorder>>,
     next_request_id: Arc<AtomicU64>,
 }
 
@@ -52,6 +56,10 @@ impl std::fmt::Debug for ProxyState {
             .field("config", &self.config)
             .field("middlewares", &mw_names)
             .field("client", &self.client)
+            .field(
+                "cost_recorder",
+                &self.cost_recorder.as_ref().map(|_| "CostRecorder"),
+            )
             .field("next_request_id", &self.next_request_id)
             .finish()
     }
@@ -63,6 +71,7 @@ impl std::fmt::Debug for ProxyState {
 pub struct AgentProxy {
     config: ProxyConfig,
     middlewares: Arc<Vec<Box<dyn ProxyMiddleware>>>,
+    cost_recorder: Option<Arc<dyn CostRecorder>>,
 }
 
 impl AgentProxy {
@@ -85,6 +94,7 @@ impl AgentProxy {
             config: Arc::new(self.config),
             middlewares: self.middlewares,
             client,
+            cost_recorder: self.cost_recorder,
             next_request_id: Arc::new(AtomicU64::new(1)),
         });
         Ok(build_router(state))
@@ -104,6 +114,7 @@ impl AgentProxy {
             config: Arc::new(self.config),
             middlewares: self.middlewares,
             client,
+            cost_recorder: self.cost_recorder,
             next_request_id: Arc::new(AtomicU64::new(1)),
         });
 
@@ -117,7 +128,7 @@ impl AgentProxy {
             .await
             .map_err(|e| ProxyError::Internal(e.into()))?;
 
-        tracing::info!("agent-proxy listening on {}", state.config.listen);
+        tracing::warn!("agent-proxy listening on {}", state.config.listen);
 
         let handle = tokio::spawn(async move {
             if let Err(e) = axum::serve(listener, app).await {
@@ -146,9 +157,17 @@ impl AgentProxy {
 pub struct AgentProxyBuilder {
     config: Option<ProxyConfig>,
     middlewares: Vec<Box<dyn ProxyMiddleware>>,
+    cost_recorder: Option<Arc<dyn CostRecorder>>,
 }
 
 impl AgentProxyBuilder {
+    /// Sets the cost recorder for post-response billing.
+    #[must_use]
+    pub fn cost_recorder(mut self, cr: Arc<dyn CostRecorder>) -> Self {
+        self.cost_recorder = Some(cr);
+        self
+    }
+
     /// Sets the proxy configuration.
     #[must_use]
     pub fn config(mut self, config: ProxyConfig) -> Self {
@@ -175,6 +194,7 @@ impl AgentProxyBuilder {
         Ok(AgentProxy {
             config,
             middlewares: Arc::new(self.middlewares),
+            cost_recorder: self.cost_recorder,
         })
     }
 }
@@ -203,7 +223,7 @@ impl std::fmt::Debug for AgentProxy {
 fn build_reqwest_client(config: &ProxyConfig) -> Result<reqwest::Client, ProxyError> {
     reqwest::Client::builder()
         .connect_timeout(config.upstream_connect_timeout)
-        .timeout(config.upstream_timeout)
+        .read_timeout(config.upstream_read_timeout)
         .http1_only()
         .build()
         .map_err(|e| ProxyError::Internal(e.into()))
@@ -246,7 +266,7 @@ async fn handle_proxy_request(
 ) -> Response<Body> {
     let request_id = state.next_request_id();
     let path = req.uri().path().to_string();
-    let detected_format = ApiFormat::from_path(&path);
+    let detected_format = detect_api_format(&path);
 
     // Unknown path → 404
     if detected_format.is_none() {
@@ -304,7 +324,77 @@ async fn handle_proxy_request(
 
     let mut proxy_req = ProxyRequest::new(parts.method, path, parts.headers, body_bytes);
 
+    // ── Pre-middleware input validation ─────────────────────────────
+    if let Err(e) = validate_proxy_request(&proxy_req) {
+        log_error(
+            &e,
+            &ConnectionContext::new(request_id, agent_type, agent_role.clone(), detected_format),
+        );
+        return e.to_response();
+    }
+
     let mut ctx = ConnectionContext::new(request_id, agent_type, agent_role, detected_format);
+
+    // ── Session correlation: extract header + consume tokenless report ──
+    let session_id = proxy_req
+        .headers
+        .iter()
+        .find(|(k, _)| k.as_str().eq_ignore_ascii_case("x-claude-code-session-id"))
+        .and_then(|(_, v)| v.to_str().ok())
+        .map(|s| s.to_string());
+
+    let mut project_path = proxy_req
+        .headers
+        .iter()
+        .find(|(k, _)| {
+            let key = k.as_str().to_lowercase();
+            key == "x-claude-code-project-path" || key == "x-project-path"
+        })
+        .and_then(|(_, v)| v.to_str().ok())
+        .map(|s| s.to_string());
+
+    // Log all x-* headers and billing-relevant fields for debugging
+    let billing_headers: Vec<String> = proxy_req
+        .headers
+        .iter()
+        .filter(|(k, _)| {
+            let key = k.as_str().to_lowercase();
+            key.starts_with("x-")
+        })
+        .map(|(k, v)| format!("{}={}", k.as_str(), v.to_str().unwrap_or("<binary>")))
+        .collect();
+    tracing::info!(
+        request_id = ctx.request_id,
+        session_id = ?session_id,
+        project_path = ?project_path,
+        agent_type = %agent_type,
+        headers = %billing_headers.join(", "),
+        "billing correlation headers"
+    );
+
+    if let Some(ref sid) = session_id {
+        // Always set session_id from header (regardless of report availability)
+        ctx.session_id = Some(sid.clone());
+
+        if let Some(acc) = crate::report::consume_report(sid) {
+            ctx.tokenless_saved_tokens = acc.total_saved;
+            ctx.tokenless_breakdown_json = Some(acc.breakdown_json);
+            // Fallback: extract project_path from report if no header
+            if project_path.is_none() {
+                project_path = acc.project_path;
+            }
+        }
+    }
+
+    if let Some(ref proj) = project_path {
+        ctx.project_path = Some(proj.clone());
+    }
+
+    // ── Inject compression stats from tokenless env var ────────────
+    let compression_stats = crate::compression::read_tokenless_stats();
+    if compression_stats.total_saved() > 0 {
+        ctx.insert(crate::extensions::EXT_COMPRESSION_STATS, compression_stats);
+    }
 
     // on_request chain (registration order)
     if let Err(e) = run_on_request_chain(&state.middlewares, &mut proxy_req, &mut ctx).await {
@@ -317,10 +407,10 @@ async fn handle_proxy_request(
 
     if let Some(ch) = channel {
         let url = ch.url.clone();
-        let api_key = Some(ch.api_key.clone());
+        let api_key = ch.api_key.expose_secret().to_owned();
         let is_streaming = proxy_req.is_streaming();
 
-        match forward_to_upstream(&state.client, &proxy_req, &url, api_key.as_deref()).await {
+        match forward_to_upstream(&state.client, &proxy_req, &url, Some(&api_key)).await {
             Ok(upstream_resp) => {
                 if is_streaming {
                     handle_streaming_response(upstream_resp, &state, &ctx).await
@@ -363,11 +453,34 @@ async fn handle_non_streaming_response(
         }
     };
 
+    let body_text = String::from_utf8_lossy(&body_bytes);
+    tracing::warn!(
+        request_id = ctx.request_id,
+        upstream_status = %status,
+        upstream_body = %body_text,
+        target_protocol = ?ctx.target_protocol,
+        channel = ?ctx.get::<crate::types::ChannelConfig>(crate::extensions::EXT_SELECTED_CHANNEL).map(|ch| ch.name.clone()),
+        "upstream response received"
+    );
+
     let mut proxy_resp = ProxyResponse::new(status, headers, body_bytes, false);
 
     if let Err(e) = run_on_response_chain(&state.middlewares, &mut proxy_resp, ctx).await {
         log_error(&e, ctx);
         return e.to_response();
+    }
+
+    // Cost recording (fire-and-forget — failures are logged but don't block)
+    if let Some(ref cr) = state.cost_recorder {
+        if let Ok(body_json) = serde_json::from_slice::<serde_json::Value>(&proxy_resp.body) {
+            if let Err(e) = cr.record(ctx, &body_json).await {
+                tracing::warn!(
+                    request_id = ctx.request_id,
+                    error = %e,
+                    "cost recording failed"
+                );
+            }
+        }
     }
 
     build_axum_response(proxy_resp)
@@ -398,6 +511,16 @@ async fn handle_streaming_response(
         }
     };
 
+    let body_text = String::from_utf8_lossy(&body_bytes);
+    tracing::warn!(
+        request_id = ctx.request_id,
+        upstream_status = %status,
+        upstream_body = %body_text,
+        target_protocol = ?ctx.target_protocol,
+        channel = ?ctx.get::<crate::types::ChannelConfig>(crate::extensions::EXT_SELECTED_CHANNEL).map(|ch| ch.name.clone()),
+        "upstream streaming response received"
+    );
+
     let mut proxy_resp = ProxyResponse::new(status, headers, body_bytes, true);
 
     if let Err(e) = run_on_response_chain(&state.middlewares, &mut proxy_resp, ctx).await {
@@ -405,7 +528,45 @@ async fn handle_streaming_response(
         return e.to_response();
     }
 
+    // Cost recording for streaming responses (SSE usage is extracted from buffered body)
+    if let Some(ref cr) = state.cost_recorder {
+        let body_json = extract_usage_from_sse(&proxy_resp.body);
+        if let Err(e) = cr.record(ctx, &body_json).await {
+            tracing::warn!(
+                request_id = ctx.request_id,
+                error = %e,
+                "cost recording failed for streaming response"
+            );
+        }
+    }
+
     build_axum_response(proxy_resp)
+}
+
+/// Validates a [`ProxyRequest`] before the middleware chain runs.
+///
+/// Catches obviously malformed requests early:
+/// - Non-JSON content-type
+/// - Empty body
+fn validate_proxy_request(req: &ProxyRequest) -> Result<(), ProxyError> {
+    // Reject non-JSON content-type
+    if let Some(ct) = req
+        .headers
+        .get("content-type")
+        .and_then(|v| v.to_str().ok())
+        && !ct.starts_with("application/json")
+    {
+        return Err(ProxyError::BadRequest(format!(
+            "unsupported content-type: {ct}. expected application/json"
+        )));
+    }
+
+    // Reject empty body
+    if req.body.is_empty() {
+        return Err(ProxyError::BadRequest("empty request body".into()));
+    }
+
+    Ok(())
 }
 
 /// Forwards the proxy request to the upstream server.
@@ -415,12 +576,8 @@ async fn forward_to_upstream(
     upstream_url: &str,
     api_key: Option<&str>,
 ) -> Result<reqwest::Response, ProxyError> {
-    // Build the upstream URL (append the path)
-    let url = if upstream_url.ends_with('/') {
-        format!("{}{}", upstream_url.trim_end_matches('/'), &proxy_req.path)
-    } else {
-        format!("{}{}", upstream_url, proxy_req.path)
-    };
+    // Build the upstream URL: base + request path.
+    let url = format!("{}{}", upstream_url.trim_end_matches('/'), proxy_req.path);
 
     let mut req_builder = client
         .request(proxy_req.method.clone(), &url)
@@ -524,6 +681,65 @@ fn log_error(err: &ProxyError, ctx: &ConnectionContext) {
     }
 }
 
+/// Extracts token usage from an SSE streaming response body and wraps it
+/// in a JSON value suitable for cost recording.
+///
+/// Parses `data:` lines looking for usage-bearing events:
+/// - **Anthropic**: `message_delta` event with `usage` field
+/// - **OpenAI Chat**: last chunk with `usage` field (before `[DONE]`)
+/// - **OpenAI Responses**: `response.completed` event with `usage` field
+///
+/// The last usage event wins, matching the upstream API behavior where
+/// usage is reported at the end of the stream.
+fn extract_usage_from_sse(body: &[u8]) -> serde_json::Value {
+    let text = match std::str::from_utf8(body) {
+        Ok(t) => t,
+        Err(_) => return serde_json::Value::Null,
+    };
+
+    let mut last_usage: Option<serde_json::Value> = None;
+
+    for line in text.lines() {
+        let data = line.strip_prefix("data: ").unwrap_or(line);
+        if data.is_empty() || data == "[DONE]" {
+            continue;
+        }
+        let Ok(event) = serde_json::from_str::<serde_json::Value>(data) else {
+            continue;
+        };
+
+        // Anthropic message_delta
+        if event.get("type").and_then(|v| v.as_str()) == Some("message_delta") {
+            if let Some(u) = event.get("usage") {
+                last_usage = Some(u.clone());
+            }
+        }
+        // Anthropic message_start (may include usage)
+        if event.get("type").and_then(|v| v.as_str()) == Some("message_start") {
+            if let Some(u) = event.get("message").and_then(|m| m.get("usage")) {
+                last_usage = Some(u.clone());
+            }
+        }
+        // OpenAI Responses completed
+        if event.get("type").and_then(|v| v.as_str()) == Some("response.completed") {
+            if let Some(u) = event.get("response").and_then(|r| r.get("usage")) {
+                last_usage = Some(u.clone());
+            }
+        }
+        // OpenAI Chat: has "choices" and "usage"
+        if event.get("choices").is_some() {
+            if let Some(u) = event.get("usage") {
+                last_usage = Some(u.clone());
+            }
+        }
+    }
+
+    match last_usage {
+        Some(usage) => serde_json::json!({"usage": usage}),
+        None => serde_json::Value::Null,
+    }
+}
+
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
@@ -532,7 +748,10 @@ mod tests {
     use tower::ServiceExt;
 
     use super::*;
-    use crate::{middleware::ProxyMiddleware, types::ChannelConfig};
+    use crate::{
+        middleware::ProxyMiddleware,
+        types::{ApiFormat, ChannelConfig},
+    };
 
     /// Mock middleware that sets an upstream URL via extensions.
     struct UpstreamMiddleware {
@@ -550,7 +769,7 @@ mod tests {
                 crate::extensions::EXT_SELECTED_CHANNEL,
                 ChannelConfig {
                     url: self.url.clone(),
-                    api_key: "sk-test".into(),
+                    api_key: secrecy::SecretString::from("sk-test"),
                     protocol: ApiFormat::AnthropicMessages,
                     name: "test".into(),
                 },
@@ -585,6 +804,7 @@ mod tests {
             config: Arc::new(config),
             middlewares: Arc::new(middlewares),
             client,
+            cost_recorder: None,
             next_request_id: Arc::new(AtomicU64::new(1)),
         });
 

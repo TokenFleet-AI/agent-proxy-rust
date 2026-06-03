@@ -5,32 +5,22 @@ use std::{any::Any, collections::HashMap, time::Instant};
 use bytes::Bytes;
 use http::{Method, header::HeaderMap};
 
-/// The detected AI API protocol format.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ApiFormat {
-    /// Anthropic Messages API (`/v1/messages`).
-    AnthropicMessages,
-    /// `OpenAI` Chat Completions API (`/v1/chat/completions`).
-    OpenaiChat,
-    /// `OpenAI` Responses API (`/v1/responses`).
-    OpenaiResponses,
-}
+/// Re-exported from [`llm_bridge_core::model::ApiFormat`] as the single source of truth.
+pub use llm_bridge_core::model::ApiFormat;
 
-impl ApiFormat {
-    /// Detects the [`ApiFormat`] from the request path.
-    ///
-    /// Returns `None` for unrecognized paths.
-    #[must_use]
-    pub fn from_path(path: &str) -> Option<Self> {
-        if path.ends_with("/v1/messages") || path == "/v1/messages" {
-            Some(Self::AnthropicMessages)
-        } else if path.ends_with("/v1/chat/completions") || path == "/v1/chat/completions" {
-            Some(Self::OpenaiChat)
-        } else if path.ends_with("/v1/responses") || path == "/v1/responses" {
-            Some(Self::OpenaiResponses)
-        } else {
-            None
-        }
+/// Detects the [`ApiFormat`] from the request path.
+///
+/// Returns `None` for unrecognized paths.
+#[must_use]
+pub fn detect_api_format(path: &str) -> Option<ApiFormat> {
+    if path.ends_with("/v1/messages") || path == "/v1/messages" {
+        Some(ApiFormat::AnthropicMessages)
+    } else if path.ends_with("/v1/chat/completions") || path == "/v1/chat/completions" {
+        Some(ApiFormat::OpenaiChat)
+    } else if path.ends_with("/v1/responses") || path == "/v1/responses" {
+        Some(ApiFormat::OpenaiResponses)
+    } else {
+        None
     }
 }
 
@@ -51,6 +41,20 @@ pub enum AgentType {
     Hermes,
     /// Unrecognized agent type.
     Unknown,
+}
+
+impl std::fmt::Display for AgentType {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Claude => write!(f, "claude-code"),
+            Self::Codex => write!(f, "codex"),
+            Self::Gemini => write!(f, "gemini"),
+            Self::OpenCode => write!(f, "opencode"),
+            Self::OpenClaw => write!(f, "openclaw"),
+            Self::Hermes => write!(f, "hermes"),
+            Self::Unknown => write!(f, "unknown"),
+        }
+    }
 }
 
 /// Detects the [`AgentType`] from request headers.
@@ -196,6 +200,16 @@ pub struct ConnectionContext {
     pub target_protocol: Option<ApiFormat>,
     /// Extension type-map for inter-middleware communication.
     pub extensions: HashMap<String, Box<dyn Any + Send + Sync>>,
+
+    // ── Billing / session correlation fields ──
+    /// The session ID extracted from `X-Claude-Code-Session-Id` header.
+    pub session_id: Option<String>,
+    /// The project path extracted from `X-Claude-Code-Project-Path` header.
+    pub project_path: Option<String>,
+    /// Accumulated tokens saved by tokenless hooks (from report file).
+    pub tokenless_saved_tokens: u64,
+    /// Raw breakdown from tokenless reports, stored as JSON for `CostRecord`.
+    pub tokenless_breakdown_json: Option<String>,
 }
 
 impl ConnectionContext {
@@ -215,6 +229,10 @@ impl ConnectionContext {
             started_at: Instant::now(),
             target_protocol: None,
             extensions: HashMap::new(),
+            session_id: None,
+            project_path: None,
+            tokenless_saved_tokens: 0,
+            tokenless_breakdown_json: None,
         }
     }
 
@@ -244,7 +262,10 @@ pub struct ChannelConfig {
     /// The upstream base URL.
     pub url: String,
     /// The API key for the upstream channel.
-    pub api_key: String,
+    ///
+    /// Wrapped in [`secrecy::SecretString`] to prevent accidental exposure
+    /// in logs, debug output, or error messages.
+    pub api_key: secrecy::SecretString,
     /// The protocol format the channel expects.
     pub protocol: ApiFormat,
     /// The channel name for cost tracking.
@@ -259,19 +280,19 @@ mod tests {
     #[test]
     fn test_api_format_from_path() {
         assert_eq!(
-            ApiFormat::from_path("/v1/messages"),
+            detect_api_format("/v1/messages"),
             Some(ApiFormat::AnthropicMessages)
         );
         assert_eq!(
-            ApiFormat::from_path("/v1/chat/completions"),
+            detect_api_format("/v1/chat/completions"),
             Some(ApiFormat::OpenaiChat)
         );
         assert_eq!(
-            ApiFormat::from_path("/v1/responses"),
+            detect_api_format("/v1/responses"),
             Some(ApiFormat::OpenaiResponses)
         );
-        assert_eq!(ApiFormat::from_path("/health"), None);
-        assert_eq!(ApiFormat::from_path("/unknown"), None);
+        assert_eq!(detect_api_format("/health"), None);
+        assert_eq!(detect_api_format("/unknown"), None);
     }
 
     #[test]

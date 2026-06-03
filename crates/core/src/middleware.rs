@@ -289,3 +289,26 @@ mod tests {
         assert!(result.is_err());
     }
 }
+
+// ── Cost recorder trait ────────────────────────────────────────────────
+
+/// Post-response cost recording hook.
+///
+/// Called after the `on_response` middleware chain completes and before the
+/// axum response is built. Implementors (typically the `cost` crate) use this
+/// to extract usage, calculate cost, and persist a `CostRecord`.
+///
+/// This is deliberately not part of [`ProxyMiddleware`] because cost recording
+/// needs to happen after ALL other response transformations are done.
+#[async_trait::async_trait]
+pub trait CostRecorder: Send + Sync + std::fmt::Debug {
+    /// Record a cost entry for the completed request.
+    ///
+    /// `response_body` is the final response body JSON (after all middleware
+    /// transforms have been applied).
+    async fn record(
+        &self,
+        ctx: &crate::types::ConnectionContext,
+        response_body: &serde_json::Value,
+    ) -> Result<(), crate::error::ProxyError>;
+}

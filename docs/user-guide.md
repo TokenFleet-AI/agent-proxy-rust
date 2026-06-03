@@ -247,9 +247,11 @@ Ruflo agent_spawn:
 ```sql
 SELECT
     agent_role,
-    SUM(actual_cost) as total_cost,
-    COUNT(*) as requests
+    SUM(cost) as total_cost,
+    COUNT(*) as requests,
+    SUM(tokens_saved) as total_saved
 FROM cost_records
+WHERE agent_role IS NOT NULL
 GROUP BY agent_role;
 ```
 
@@ -267,28 +269,40 @@ sqlite3 ~/.local/share/agent-proxy/agent-proxy.db
 
 # 本月各项目花费
 SELECT
-    project_name,
-    SUM(actual_cost) as total_cost,
-    SUM(input_tokens + output_tokens) as total_tokens
+    project,
+    SUM(cost) as total_cost,
+    SUM(input_tokens + output_tokens) as total_tokens,
+    SUM(tokens_saved) as total_saved
 FROM cost_records
-WHERE date(timestamp, 'unixepoch') >= date('now', 'start of month')
-GROUP BY project_path
+WHERE timestamp >= date('now', 'start of month')
+GROUP BY project
 ORDER BY total_cost DESC;
 
 # 各通道花费
 SELECT
-    channel_name,
+    channel_id,
     COUNT(*) as requests,
-    SUM(actual_cost) as cost
+    SUM(cost) as cost,
+    SUM(tokens_saved) as total_saved
 FROM cost_records
-GROUP BY channel_name
+GROUP BY channel_id
 ORDER BY cost DESC;
+
+# 按 session 汇总
+SELECT
+    session_id,
+    COUNT(*) as requests,
+    SUM(cost) as total_cost,
+    SUM(tokens_saved) as total_saved
+FROM cost_records
+WHERE session_id IS NOT NULL
+GROUP BY session_id;
 
 # 压缩节省
 SELECT
-    SUM(pre_compress_tokens) as before,
-    SUM(post_compress_tokens) as after,
-    ROUND(100.0 * SUM(compression_tokens_saved) / SUM(pre_compress_tokens), 1) as pct_saved
+    SUM(before_tokens) as before,
+    SUM(after_tokens) as after,
+    ROUND(100.0 * SUM(tokens_saved) / NULLIF(SUM(after_tokens + tokens_saved), 0), 1) as pct_saved
 FROM cost_records;
 ```
 

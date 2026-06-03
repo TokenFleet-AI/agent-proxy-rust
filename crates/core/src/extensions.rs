@@ -25,3 +25,9 @@ pub const EXT_SELECTED_MAPPING: &str = "selected_mapping";
 /// Set by the bridge middleware to indicate that the response needs reverse
 /// protocol conversion.
 pub const EXT_BRIDGE_REVERSE: &str = "bridge_reverse";
+
+/// Key for [`CompressionStats`](crate::compression::CompressionStats).
+///
+/// Written by `server.rs` from `TOKENLESS_TOKENS` env var,
+/// appended by the compress middleware, and read by the cost module.
+pub const EXT_COMPRESSION_STATS: &str = "compression_stats";

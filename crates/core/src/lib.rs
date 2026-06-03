@@ -21,19 +21,24 @@
 #![warn(missing_docs, missing_debug_implementations)]
 
 pub mod auth;
+pub mod compression;
 pub mod config;
 pub mod error;
 pub mod extensions;
 pub mod middleware;
+pub mod report;
 pub mod server;
 pub mod testing;
 pub mod types;
 
 // Re-export key types for convenience
+pub use compression::{CompressionStats, read_tokenless_stats};
 pub use config::ProxyConfig;
 pub use error::ProxyError;
+pub use middleware::CostRecorder;
 pub use middleware::ProxyMiddleware;
 pub use server::{AgentProxy, AgentProxyBuilder};
 pub use types::{
     AgentType, ApiFormat, ChannelConfig, ConnectionContext, ProxyRequest, ProxyResponse,
+    detect_api_format,
 };

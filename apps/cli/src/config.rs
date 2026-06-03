@@ -34,9 +34,12 @@ pub struct ServeArgs {
     #[arg(long = "max-body-size", env = "AGENT_PROXY_MAX_BODY_SIZE")]
     pub max_body_size: Option<usize>,
 
-    /// Upstream request timeout in seconds (1–300).
-    #[arg(long = "upstream-timeout", env = "AGENT_PROXY_UPSTREAM_TIMEOUT")]
-    pub upstream_timeout: Option<u64>,
+    /// Upstream per-read timeout in seconds (1–3600).
+    #[arg(
+        long = "upstream-read-timeout",
+        env = "AGENT_PROXY_UPSTREAM_READ_TIMEOUT"
+    )]
+    pub upstream_read_timeout: Option<u64>,
 
     /// Upstream connect timeout in seconds (1–300).
     #[arg(
@@ -83,8 +86,8 @@ pub struct ProxyConfig {
     /// Maximum request body size in bytes.
     pub max_body_size: usize,
 
-    /// Upstream request timeout in seconds.
-    pub upstream_timeout: u64,
+    /// Upstream per-read timeout in seconds.
+    pub upstream_read_timeout: u64,
 
     /// Upstream connect timeout in seconds.
     pub upstream_connect_timeout: u64,
@@ -255,7 +258,7 @@ pub fn load_config(args: &ServeArgs) -> Result<ProxyConfig, anyhow::Error> {
     builder = builder
         .set_default("listen", "127.0.0.1:8787")?
         .set_default("max_body_size", 16_777_216_i64)?
-        .set_default("upstream_timeout", 30_i64)?
+        .set_default("upstream_read_timeout", 600_i64)?
         .set_default("upstream_connect_timeout", 10_i64)?;
 
     // YAML file (auto-discovery or explicit)
@@ -345,8 +348,8 @@ fn apply_cli_overrides(config: &mut ProxyConfig, args: &ServeArgs) {
         config.max_body_size = size;
     }
 
-    if let Some(timeout) = args.upstream_timeout {
-        config.upstream_timeout = timeout;
+    if let Some(timeout) = args.upstream_read_timeout {
+        config.upstream_read_timeout = timeout;
     }
 
     if let Some(timeout) = args.upstream_connect_timeout {
@@ -386,11 +389,11 @@ fn validate(config: &ProxyConfig) -> Result<(), anyhow::Error> {
         ));
     }
 
-    // upstream_timeout: 1s – 300s
-    if config.upstream_timeout < 1 || config.upstream_timeout > 300 {
+    // upstream_read_timeout: 1s – 3600s
+    if config.upstream_read_timeout < 1 || config.upstream_read_timeout > 3600 {
         errors.push(format!(
-            "upstream_timeout ({}) must be between 1 and 300 seconds",
-            config.upstream_timeout
+            "upstream_read_timeout ({}) must be between 1 and 3600 seconds",
+            config.upstream_read_timeout
         ));
     }
 
@@ -451,7 +454,7 @@ mod tests {
             listen: "127.0.0.1:8787".parse().expect("valid socket addr"),
             data_dir: PathBuf::from("/tmp/ap"),
             max_body_size: 16_777_216,
-            upstream_timeout: 30,
+            upstream_read_timeout: 600,
             upstream_connect_timeout: 10,
             proxy_api_key: None,
             proxy_secret: "shh".into(),
@@ -494,19 +497,19 @@ mod tests {
     }
 
     #[test]
-    fn test_should_reject_upstream_timeout_too_low() {
+    fn test_should_reject_upstream_read_timeout_too_low() {
         let mut cfg = valid_config();
-        cfg.upstream_timeout = 0;
+        cfg.upstream_read_timeout = 0;
         let err = validate(&cfg).unwrap_err().to_string();
-        assert!(err.contains("upstream_timeout"));
+        assert!(err.contains("upstream_read_timeout"));
     }
 
     #[test]
-    fn test_should_reject_upstream_timeout_too_high() {
+    fn test_should_reject_upstream_read_timeout_too_high() {
         let mut cfg = valid_config();
-        cfg.upstream_timeout = 301;
+        cfg.upstream_read_timeout = 3601;
         let err = validate(&cfg).unwrap_err().to_string();
-        assert!(err.contains("upstream_timeout"));
+        assert!(err.contains("upstream_read_timeout"));
     }
 
     #[test]
@@ -541,11 +544,11 @@ mod tests {
         let mut cfg = valid_config();
         cfg.proxy_secret = String::new();
         cfg.max_body_size = 100;
-        cfg.upstream_timeout = 0;
+        cfg.upstream_read_timeout = 0;
         let err = validate(&cfg).unwrap_err().to_string();
         assert!(err.contains("PROXY_SECRET"));
         assert!(err.contains("max_body_size"));
-        assert!(err.contains("upstream_timeout"));
+        assert!(err.contains("upstream_read_timeout"));
     }
 
     // ── Default values ──────────────────────────────────────

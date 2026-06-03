@@ -69,7 +69,7 @@ pub fn test_connection_context_with_role(role: impl Into<String>) -> ConnectionC
 pub fn test_channel_config(base_url: impl Into<String>) -> ChannelConfig {
     ChannelConfig {
         url: base_url.into(),
-        api_key: "sk-test-channel-key".into(),
+        api_key: secrecy::SecretString::from("sk-test-channel-key"),
         protocol: ApiFormat::AnthropicMessages,
         name: "test-channel".into(),
     }
@@ -80,7 +80,7 @@ pub fn test_channel_config(base_url: impl Into<String>) -> ChannelConfig {
 pub fn test_channel_config_openai(base_url: impl Into<String>) -> ChannelConfig {
     ChannelConfig {
         url: base_url.into(),
-        api_key: "sk-test-openai-key".into(),
+        api_key: secrecy::SecretString::from("sk-test-openai-key"),
         protocol: ApiFormat::OpenaiChat,
         name: "test-openai-channel".into(),
     }

@@ -36,8 +36,9 @@ struct ResolvedChannel {
     channel_id: String,
     channel_name: String,
     url: String,
-    api_key: String,
+    api_key: secrecy::SecretString,
     protocol: ApiFormat,
+    protocols_json: String,
     enabled: bool,
     mappings: Vec<ResolvedMapping>,
 }
@@ -64,6 +65,10 @@ pub struct SelectedMappingInfo {
     pub upstream_name: String,
     /// Whether this mapping uses flat-fee billing.
     pub is_flat_fee: bool,
+    /// Pricing snapshot at selection time (metered only).
+    pub pricing: Option<Pricing>,
+    /// Serialized pricing for audit trail.
+    pub pricing_snapshot_json: String,
 }
 
 /// Channel selection and model routing middleware.
@@ -128,11 +133,26 @@ impl ModelRouterMiddleware {
                 channel_id: ch.id,
                 channel_name: ch.name,
                 url: ch.base_url,
-                api_key: ch.api_key.expose_secret().to_owned(),
+                api_key: ch.api_key,
                 protocol,
+                protocols_json: ch.protocols.clone(),
                 enabled: ch.enabled,
                 mappings,
             });
+        }
+
+        // Mark channels without API keys as Unavailable (DB only, for UI display)
+        for ch in &channels {
+            if ch.api_key.expose_secret().is_empty() {
+                if let Err(e) = storage.set_channel_enabled(&ch.channel_id, true).await {
+                    tracing::warn!(channel=%ch.channel_id, error=%e, "failed to check channel");
+                }
+                // Persist Unavailable status to DB so Admin API shows it
+                let _ = storage.record_channel_failure(&ch.channel_id).await;
+                let _ = storage.record_channel_failure(&ch.channel_id).await;
+                let _ = storage.record_channel_failure(&ch.channel_id).await;
+                tracing::info!(channel=%ch.channel_id, name=%ch.channel_name, "no API key — Unavailable");
+            }
         }
 
         Ok(Self {
@@ -314,16 +334,29 @@ impl ProxyMiddleware for ModelRouterMiddleware {
         // Set target protocol
         ctx.target_protocol = Some(channel.protocol);
 
+        // Resolve upstream URL with protocol path prefix
+        let upstream_url =
+            resolve_upstream_url(&channel.url, channel.protocol, &channel.protocols_json);
+
         // Write ChannelConfig to extensions
         ctx.insert(
             EXT_SELECTED_CHANNEL,
             ChannelConfig {
-                url: channel.url.clone(),
+                url: upstream_url,
                 api_key: channel.api_key.clone(),
                 protocol: channel.protocol,
                 name: channel.channel_name.clone(),
             },
         );
+
+        // Extract pricing snapshot from billing
+        let (pricing, snapshot_json) = match &mapping.billing {
+            ChannelBilling::Metered { pricing } => {
+                let json = serde_json::to_string(pricing).unwrap_or_default();
+                (Some(pricing.clone()), json)
+            }
+            ChannelBilling::FlatFee { .. } => (None, r#"{"type":"flat_fee"}"#.to_string()),
+        };
 
         // Write selected mapping info to extensions
         ctx.insert(
@@ -334,6 +367,8 @@ impl ProxyMiddleware for ModelRouterMiddleware {
                 client_name: mapping.client_name.clone(),
                 upstream_name: mapping.upstream_name.clone(),
                 is_flat_fee: mapping.billing.is_flat_fee(),
+                pricing,
+                pricing_snapshot_json: snapshot_json,
             },
         );
 
@@ -403,6 +438,57 @@ impl ProxyMiddleware for ModelRouterMiddleware {
 
 // ── Helpers ─────────────────────────────────────────────────────────
 
+/// Builds the full upstream URL by resolving the protocol-specific path prefix
+/// from `protocols_json` and prepending it to `base_url`.
+///
+/// Each channel's `protocols` JSON contains an array like:
+/// ```json
+/// [{"protocol":"openai_chat","path":"/v1/chat/completions"},{"protocol":"anthropic_messages","path":"/anthropic"}]
+/// ```
+///
+/// The matching entry's `path` is used as a prefix, so the final upstream URL
+/// becomes `{base_url}{path_prefix}`. The request path is appended later by
+/// `forward_to_upstream`.
+fn resolve_upstream_url(base_url: &str, protocol: ApiFormat, protocols_json: &str) -> String {
+    let base = base_url.trim_end_matches('/').to_string();
+    let target_protocol = protocol_to_str(protocol);
+
+    let path_prefix = protocols_json
+        .parse::<serde_json::Value>()
+        .ok()
+        .and_then(|v| v.as_array().cloned())
+        .into_iter()
+        .flatten()
+        .find_map(|entry| {
+            let matches = entry
+                .get("protocol")
+                .and_then(|p| p.as_str())
+                .is_some_and(|p| p == target_protocol);
+            if matches {
+                entry
+                    .get("path")
+                    .and_then(|p| p.as_str())
+                    .map(|s| s.trim_end_matches('/').to_string())
+            } else {
+                None
+            }
+        })
+        .unwrap_or_default();
+
+    format!("{base}{path_prefix}")
+}
+
+/// Returns the snake_case string representation for an [`ApiFormat`] variant,
+/// matching the format used in the `protocols` JSON column.
+fn protocol_to_str(protocol: ApiFormat) -> &'static str {
+    match protocol {
+        ApiFormat::AnthropicMessages => "anthropic_messages",
+        ApiFormat::OpenaiChat => "openai_chat",
+        ApiFormat::OpenaiResponses => "openai_responses",
+        _ => "",
+    }
+}
+
 fn parse_protocol(s: &str) -> Result<ApiFormat, ProxyError> {
     match s {
         "anthropic_messages" => Ok(ApiFormat::AnthropicMessages),
@@ -451,8 +537,9 @@ mod tests {
             channel_id: id.into(),
             channel_name: name.into(),
             url: format!("https://{id}.example.com"),
-            api_key: "sk-test".into(),
+            api_key: secrecy::SecretString::from("sk-test"),
             protocol,
+            protocols_json: String::new(),
             enabled: true,
             mappings,
         }
@@ -487,6 +574,7 @@ mod tests {
                     cache_write_per_mtok: None,
                     cache_read_per_mtok: None,
                     thinking_per_mtok: None,
+                    currency: "USD".to_string(),
                 },
             },
         }
@@ -629,8 +717,9 @@ mod tests {
                 channel_id: "disabled".into(),
                 channel_name: "Disabled".into(),
                 url: "https://disabled.example.com".into(),
-                api_key: "sk-test".into(),
+                api_key: secrecy::SecretString::from("sk-test"),
                 protocol: ApiFormat::AnthropicMessages,
+                protocols_json: String::new(),
                 enabled: false,
                 mappings: vec![make_mapping_metered("claude-sonnet", "claude-opus-4-7")],
             }],

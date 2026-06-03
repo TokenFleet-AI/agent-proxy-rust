@@ -5,12 +5,34 @@ PRAGMA journal_mode=WAL;
 PRAGMA busy_timeout=5000;
 PRAGMA foreign_keys=ON;
 
+-- ── Providers & Models (single source of truth for UI + proxy) ──
+
+CREATE TABLE IF NOT EXISTS providers (
+    id TEXT PRIMARY KEY,
+    name TEXT NOT NULL UNIQUE,
+    created_at INTEGER NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS models (
+    id TEXT PRIMARY KEY,
+    provider_id TEXT NOT NULL REFERENCES providers(id),
+    client_name TEXT NOT NULL UNIQUE,
+    price_input REAL NOT NULL DEFAULT 0,
+    price_output REAL NOT NULL DEFAULT 0,
+    currency TEXT NOT NULL DEFAULT 'USD',
+    context_window INTEGER NOT NULL DEFAULT 0,
+    created_at INTEGER NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_models_provider ON models(provider_id);
+
 CREATE TABLE IF NOT EXISTS channels (
     id TEXT PRIMARY KEY,
     name TEXT NOT NULL,
     url TEXT NOT NULL,
     api_key TEXT NOT NULL,
     protocol TEXT NOT NULL,
+    protocols TEXT NOT NULL DEFAULT '[]',
     is_builtin BOOLEAN DEFAULT 0,
     enabled BOOLEAN DEFAULT 1,
     created_at INTEGER NOT NULL,
@@ -87,126 +109,103 @@ CREATE TABLE IF NOT EXISTS cost_records_daily (
 
 CREATE INDEX IF NOT EXISTS idx_cost_daily_date ON cost_records_daily(date);
 
--- Seed default builtin channels (api_key is empty, user must set it).
-INSERT OR IGNORE INTO channels (id, name, url, api_key, protocol, is_builtin, enabled, created_at, updated_at)
-VALUES
-    -- Anthropic
-    ('anthropic-official', 'Anthropic Official', 'https://api.anthropic.com', '', 'anthropic_messages', 1, 1, strftime('%s', 'now'), strftime('%s', 'now')),
-    -- OpenAI
-    ('openai-official', 'OpenAI Official', 'https://api.openai.com', '', 'openai_responses', 1, 1, strftime('%s', 'now'), strftime('%s', 'now')),
-    -- DeepSeek
-    ('deepseek-openai', 'DeepSeek Official (OpenAI)', 'https://api.deepseek.com', '', 'openai_chat', 1, 1, strftime('%s', 'now'), strftime('%s', 'now')),
-    ('deepseek-anthropic', 'DeepSeek Official (Anthropic)', 'https://api.deepseek.com/anthropic', '', 'anthropic_messages', 1, 1, strftime('%s', 'now'), strftime('%s', 'now')),
-    -- DashScope Token Plan
-    ('dashscope-token-openai', 'DashScope Token Plan (OpenAI)', 'https://token-plan.cn-beijing.maas.aliyuncs.com/compatible-mode/v1', '', 'openai_chat', 1, 1, strftime('%s', 'now'), strftime('%s', 'now')),
-    ('dashscope-token-anthropic', 'DashScope Token Plan (Anthropic)', 'https://token-plan.cn-beijing.maas.aliyuncs.com/apps/anthropic', '', 'anthropic_messages', 1, 1, strftime('%s', 'now'), strftime('%s', 'now')),
-    -- DashScope Coding Plan
-    ('dashscope-coding-openai', 'DashScope Coding Plan (OpenAI)', 'https://coding.dashscope.aliyuncs.com/v1', '', 'openai_chat', 1, 1, strftime('%s', 'now'), strftime('%s', 'now')),
-    ('dashscope-coding-anthropic', 'DashScope Coding Plan (Anthropic)', 'https://coding.dashscope.aliyuncs.com/apps/anthropic', '', 'anthropic_messages', 1, 1, strftime('%s', 'now'), strftime('%s', 'now')),
-    -- DashScope Pay-as-you-go (北京)
-    ('dashscope-payg-openai', 'DashScope Pay-as-you-go (OpenAI)', 'https://dashscope.aliyuncs.com/compatible-mode/v1', '', 'openai_chat', 1, 1, strftime('%s', 'now'), strftime('%s', 'now')),
-    ('dashscope-payg-anthropic', 'DashScope Pay-as-you-go (Anthropic)', 'https://dashscope.aliyuncs.com/apps/anthropic', '', 'anthropic_messages', 1, 1, strftime('%s', 'now'), strftime('%s', 'now')),
-    -- GLM
-    ('glm-official', 'Zhipu GLM Official', 'https://open.bigmodel.cn/api/paas/v4', '', 'openai_chat', 1, 1, strftime('%s', 'now'), strftime('%s', 'now')),
-    -- Kimi
-    ('kimi-official', 'Kimi Official', 'https://api.moonshot.cn/v1', '', 'openai_chat', 1, 1, strftime('%s', 'now'), strftime('%s', 'now')),
-    -- MiniMax
-    ('minimax-official', 'MiniMax Official', 'https://api.minimax.chat/v1', '', 'openai_chat', 1, 1, strftime('%s', 'now'), strftime('%s', 'now'));
+-- ── Seed providers ──
+INSERT OR IGNORE INTO providers (id, name, created_at) VALUES
+    ('deepseek', 'DeepSeek', strftime('%s', 'now')),
+    ('alibaba-bailian', 'Alibaba Bailian', strftime('%s', 'now')),
+    ('moonshot', 'Moonshot (Kimi)', strftime('%s', 'now')),
+    ('zhipu', 'Zhipu AI', strftime('%s', 'now')),
+    ('minimax', 'MiniMax', strftime('%s', 'now'));
 
--- Seed model mappings.
--- id = {channel_id}:{model_id}
+-- ── Seed models (only models with channel mappings) ──
+INSERT OR IGNORE INTO models (id, provider_id, client_name, price_input, price_output, currency, context_window, created_at) VALUES
+    -- DeepSeek
+    ('deepseek:deepseek-v4-flash', 'deepseek', 'deepseek-v4-flash', 1.0, 2.0, 'CNY', 1000000, strftime('%s', 'now')),
+    ('deepseek:deepseek-v4-pro', 'deepseek', 'deepseek-v4-pro', 3.0, 6.0, 'CNY', 1000000, strftime('%s', 'now')),
+    -- Alibaba Bailian / Qwen
+    ('alibaba-bailian:qwen3.7-max', 'alibaba-bailian', 'qwen3.7-max', 6.0, 18.0, 'CNY', 256000, strftime('%s', 'now')),
+    ('alibaba-bailian:qwen3.6-max', 'alibaba-bailian', 'qwen3.6-max', 9.0, 54.0, 'CNY', 256000, strftime('%s', 'now')),
+    ('alibaba-bailian:qwen3.6-plus', 'alibaba-bailian', 'qwen3.6-plus', 2.0, 12.0, 'CNY', 1000000, strftime('%s', 'now')),
+    ('alibaba-bailian:qwen3.6-flash', 'alibaba-bailian', 'qwen3.6-flash', 1.20, 7.20, 'CNY', 1000000, strftime('%s', 'now')),
+    ('alibaba-bailian:qwen3.5-plus', 'alibaba-bailian', 'qwen3.5-plus', 0.80, 4.80, 'CNY', 1000000, strftime('%s', 'now')),
+    ('alibaba-bailian:qwen3.5-flash', 'alibaba-bailian', 'qwen3.5-flash', 0.20, 2.0, 'CNY', 1000000, strftime('%s', 'now')),
+    -- Zhipu AI / GLM
+    ('zhipu:glm-5.1', 'zhipu', 'glm-5.1', 6.0, 24.0, 'CNY', 200000, strftime('%s', 'now')),
+    ('zhipu:glm-5-turbo', 'zhipu', 'glm-5-turbo', 5.0, 22.0, 'CNY', 200000, strftime('%s', 'now')),
+    ('zhipu:glm-5', 'zhipu', 'glm-5', 4.0, 18.0, 'CNY', 200000, strftime('%s', 'now')),
+    ('zhipu:glm-4.7-flash', 'zhipu', 'glm-4.7-flash', 0.0, 0.0, 'CNY', 200000, strftime('%s', 'now')),
+    -- Moonshot / Kimi
+    ('moonshot:kimi-k2.6', 'moonshot', 'kimi-k2.6', 6.50, 27.0, 'CNY', 256000, strftime('%s', 'now')),
+    ('moonshot:kimi-k2.5', 'moonshot', 'kimi-k2.5', 4.0, 21.0, 'CNY', 256000, strftime('%s', 'now')),
+    -- MiniMax
+    ('minimax:minimax-m2.7', 'minimax', 'minimax-m2.7', 2.10, 8.40, 'CNY', 256000, strftime('%s', 'now'));
+
+-- Seed default builtin channels (multi-protocol: one channel per provider).
+INSERT OR IGNORE INTO channels (id, name, url, api_key, protocol, protocols, is_builtin, enabled, created_at, updated_at)
+VALUES
+    -- DeepSeek (OpenAI + Anthropic)
+    ('deepseek', 'DeepSeek Official', 'https://api.deepseek.com', '', 'anthropic_messages',
+     '[{"protocol":"openai_chat","path":"/v1/chat/completions"},{"protocol":"anthropic_messages","path":"/anthropic"}]',
+     1, 1, strftime('%s', 'now'), strftime('%s', 'now')),
+    -- DashScope Token Plan
+    ('dashscope-token', 'DashScope Token Plan', 'https://token-plan.cn-beijing.maas.aliyuncs.com', '', 'openai_chat',
+     '[{"protocol":"openai_chat","path":"/compatible-mode/v1"},{"protocol":"anthropic_messages","path":"/apps/anthropic"}]',
+     1, 1, strftime('%s', 'now'), strftime('%s', 'now')),
+    -- DashScope Coding Plan
+    ('dashscope-coding', 'DashScope Coding Plan', 'https://coding.dashscope.aliyuncs.com', '', 'openai_chat',
+     '[{"protocol":"openai_chat","path":"/v1"},{"protocol":"anthropic_messages","path":"/apps/anthropic"}]',
+     1, 1, strftime('%s', 'now'), strftime('%s', 'now')),
+    -- DashScope Pay-as-you-go
+    ('dashscope-payg', 'DashScope Pay-as-you-go', 'https://dashscope.aliyuncs.com', '', 'openai_chat',
+     '[{"protocol":"openai_chat","path":"/compatible-mode/v1"},{"protocol":"anthropic_messages","path":"/apps/anthropic"}]',
+     1, 1, strftime('%s', 'now'), strftime('%s', 'now')),
+    -- GLM
+    ('glm-official', 'Zhipu GLM Official', 'https://open.bigmodel.cn', '', 'openai_chat',
+     '[{"protocol":"openai_chat","path":"/api/paas/v4"}]',
+     1, 1, strftime('%s', 'now'), strftime('%s', 'now')),
+    -- Kimi
+    ('kimi-official', 'Kimi Official', 'https://api.moonshot.cn', '', 'openai_chat',
+     '[{"protocol":"openai_chat","path":"/v1"}]',
+     1, 1, strftime('%s', 'now'), strftime('%s', 'now')),
+    -- MiniMax
+    ('minimax-official', 'MiniMax Official', 'https://api.minimax.chat', '', 'openai_chat',
+     '[{"protocol":"openai_chat","path":"/v1"}]',
+     1, 1, strftime('%s', 'now'), strftime('%s', 'now'));
+
+-- Seed model mappings (matching token-fleet-switch channel_models design).
+-- Only 26 precise bindings — each model is only on channels it actually supports.
 INSERT OR IGNORE INTO model_mappings (id, channel_id, client_name, upstream_name, billing, pricing_json, weight, enabled)
 VALUES
-    -- Anthropic (USD)
-    ('anthropic-official:claude-opus-4-7', 'anthropic-official', 'claude-opus-4-7', 'claude-opus-4-7', 'metered', '{"mode":"per_token","currency":"USD","input_per_mtok":5.0,"output_per_mtok":25.0,"cache_write_per_mtok":6.25,"cache_read_per_mtok":0.50,"thinking_per_mtok":12.0}', 100, 1),
-    ('anthropic-official:claude-sonnet-4-6', 'anthropic-official', 'claude-sonnet-4-6', 'claude-sonnet-4-6', 'metered', '{"mode":"per_token","currency":"USD","input_per_mtok":3.0,"output_per_mtok":15.0,"cache_write_per_mtok":3.75,"cache_read_per_mtok":0.30}', 100, 1),
-    ('anthropic-official:claude-haiku-4-5', 'anthropic-official', 'claude-haiku-4-5', 'claude-haiku-4-5', 'metered', '{"mode":"per_token","currency":"USD","input_per_mtok":1.0,"output_per_mtok":5.0,"cache_write_per_mtok":1.25,"cache_read_per_mtok":0.10}', 100, 1),
-    -- OpenAI (USD)
-    ('openai-official:gpt-5.5', 'openai-official', 'gpt-5.5', 'gpt-5.5', 'metered', '{"mode":"per_token","currency":"USD","input_per_mtok":5.0,"output_per_mtok":30.0,"cache_read_per_mtok":1.25}', 100, 1),
-    ('openai-official:gpt-5.4', 'openai-official', 'gpt-5.4', 'gpt-5.4', 'metered', '{"mode":"per_token","currency":"USD","input_per_mtok":2.5,"output_per_mtok":15.0,"cache_read_per_mtok":0.25}', 100, 1),
-    ('openai-official:gpt-5-codex', 'openai-official', 'gpt-5-codex', 'gpt-5-codex', 'metered', '{"mode":"per_token","currency":"USD","input_per_mtok":1.25,"output_per_mtok":10.0,"cache_read_per_mtok":0.125}', 100, 1),
-    -- DeepSeek (CNY) — both protocols
-    ('deepseek-openai:deepseek-v4-flash', 'deepseek-openai', 'deepseek-v4-flash', 'deepseek-v4-flash', 'metered', '{"mode":"per_token","currency":"CNY","input_per_mtok":1.0,"output_per_mtok":2.0,"cache_read_per_mtok":0.02}', 100, 1),
-    ('deepseek-openai:deepseek-v4-pro', 'deepseek-openai', 'deepseek-v4-pro', 'deepseek-v4-pro', 'metered', '{"mode":"per_token","currency":"CNY","input_per_mtok":3.0,"output_per_mtok":6.0,"cache_read_per_mtok":0.025}', 100, 1),
-    ('deepseek-anthropic:deepseek-v4-flash', 'deepseek-anthropic', 'deepseek-v4-flash', 'deepseek-v4-flash', 'metered', '{"mode":"per_token","currency":"CNY","input_per_mtok":1.0,"output_per_mtok":2.0,"cache_read_per_mtok":0.02}', 100, 1),
-    ('deepseek-anthropic:deepseek-v4-pro', 'deepseek-anthropic', 'deepseek-v4-pro', 'deepseek-v4-pro', 'metered', '{"mode":"per_token","currency":"CNY","input_per_mtok":3.0,"output_per_mtok":6.0,"cache_read_per_mtok":0.025}', 100, 1),
-    -- Bailian/Qwen (CNY) — Pay-as-you-go channels
-    ('dashscope-payg-openai:qwen3.7-max', 'dashscope-payg-openai', 'qwen3.7-max', 'qwen3.7-max', 'metered', '{"mode":"per_token","currency":"CNY","input_per_mtok":6.0,"output_per_mtok":18.0,"cache_write_per_mtok":7.50,"cache_read_per_mtok":1.20}', 100, 1),
-    ('dashscope-payg-openai:qwen3.6-max', 'dashscope-payg-openai', 'qwen3.6-max', 'qwen3.6-max', 'metered', '{"mode":"per_token","currency":"CNY","input_per_mtok":9.0,"output_per_mtok":54.0,"cache_write_per_mtok":11.25,"cache_read_per_mtok":0.90}', 100, 1),
-    ('dashscope-payg-openai:qwen3.6-plus', 'dashscope-payg-openai', 'qwen3.6-plus', 'qwen3.6-plus', 'metered', '{"mode":"per_token","currency":"CNY","input_per_mtok":2.0,"output_per_mtok":12.0,"cache_write_per_mtok":2.50,"cache_read_per_mtok":0.20}', 100, 1),
-    ('dashscope-payg-openai:qwen3.6-flash', 'dashscope-payg-openai', 'qwen3.6-flash', 'qwen3.6-flash', 'metered', '{"mode":"per_token","currency":"CNY","input_per_mtok":1.20,"output_per_mtok":7.20,"cache_write_per_mtok":1.50,"cache_read_per_mtok":0.12}', 100, 1),
-    ('dashscope-payg-openai:qwen3.5-plus', 'dashscope-payg-openai', 'qwen3.5-plus', 'qwen3.5-plus', 'metered', '{"mode":"per_token","currency":"CNY","input_per_mtok":0.80,"output_per_mtok":4.80,"cache_write_per_mtok":1.0,"cache_read_per_mtok":0.08}', 100, 1),
-    ('dashscope-payg-openai:qwen3.5-flash', 'dashscope-payg-openai', 'qwen3.5-flash', 'qwen3.5-flash', 'metered', '{"mode":"per_token","currency":"CNY","input_per_mtok":0.20,"output_per_mtok":2.0,"cache_write_per_mtok":0.25,"cache_read_per_mtok":0.02}', 100, 1),
-    ('dashscope-payg-anthropic:qwen3.7-max', 'dashscope-payg-anthropic', 'qwen3.7-max', 'qwen3.7-max', 'metered', '{"mode":"per_token","currency":"CNY","input_per_mtok":6.0,"output_per_mtok":18.0,"cache_write_per_mtok":7.50,"cache_read_per_mtok":1.20}', 100, 1),
-    ('dashscope-payg-anthropic:qwen3.6-max', 'dashscope-payg-anthropic', 'qwen3.6-max', 'qwen3.6-max', 'metered', '{"mode":"per_token","currency":"CNY","input_per_mtok":9.0,"output_per_mtok":54.0,"cache_write_per_mtok":11.25,"cache_read_per_mtok":0.90}', 100, 1),
-    ('dashscope-payg-anthropic:qwen3.6-plus', 'dashscope-payg-anthropic', 'qwen3.6-plus', 'qwen3.6-plus', 'metered', '{"mode":"per_token","currency":"CNY","input_per_mtok":2.0,"output_per_mtok":12.0,"cache_write_per_mtok":2.50,"cache_read_per_mtok":0.20}', 100, 1),
-    ('dashscope-payg-anthropic:qwen3.6-flash', 'dashscope-payg-anthropic', 'qwen3.6-flash', 'qwen3.6-flash', 'metered', '{"mode":"per_token","currency":"CNY","input_per_mtok":1.20,"output_per_mtok":7.20,"cache_write_per_mtok":1.50,"cache_read_per_mtok":0.12}', 100, 1),
-    ('dashscope-payg-anthropic:qwen3.5-plus', 'dashscope-payg-anthropic', 'qwen3.5-plus', 'qwen3.5-plus', 'metered', '{"mode":"per_token","currency":"CNY","input_per_mtok":0.80,"output_per_mtok":4.80,"cache_write_per_mtok":1.0,"cache_read_per_mtok":0.08}', 100, 1),
-    ('dashscope-payg-anthropic:qwen3.5-flash', 'dashscope-payg-anthropic', 'qwen3.5-flash', 'qwen3.5-flash', 'metered', '{"mode":"per_token","currency":"CNY","input_per_mtok":0.20,"output_per_mtok":2.0,"cache_write_per_mtok":0.25,"cache_read_per_mtok":0.02}', 100, 1),
-    -- Zhipu GLM (CNY) — tier 1 pricing [0,32K)
-    ('glm-official:glm-5.1', 'glm-official', 'glm-5.1', 'glm-5.1', 'metered', '{"mode":"per_token","currency":"CNY","input_per_mtok":6.0,"output_per_mtok":24.0,"cache_read_per_mtok":1.30}', 100, 1),
-    ('glm-official:glm-5-turbo', 'glm-official', 'glm-5-turbo', 'glm-5-turbo', 'metered', '{"mode":"per_token","currency":"CNY","input_per_mtok":5.0,"output_per_mtok":22.0,"cache_read_per_mtok":1.20}', 100, 1),
-    ('glm-official:glm-5', 'glm-official', 'glm-5', 'glm-5', 'metered', '{"mode":"per_token","currency":"CNY","input_per_mtok":4.0,"output_per_mtok":18.0,"cache_read_per_mtok":1.0}', 100, 1),
-    ('glm-official:glm-4.7', 'glm-official', 'glm-4.7', 'glm-4.7', 'metered', '{"mode":"per_token","currency":"CNY","input_per_mtok":2.0,"output_per_mtok":8.0,"cache_read_per_mtok":0.40}', 100, 1),
-    ('glm-official:glm-4.5-air', 'glm-official', 'glm-4.5-air', 'glm-4.5-air', 'metered', '{"mode":"per_token","currency":"CNY","input_per_mtok":0.80,"output_per_mtok":2.0,"cache_read_per_mtok":0.16}', 100, 1),
-    ('glm-official:glm-4.7-flashx', 'glm-official', 'glm-4.7-flashx', 'glm-4.7-flashx', 'metered', '{"mode":"per_token","currency":"CNY","input_per_mtok":0.50,"output_per_mtok":3.0,"cache_read_per_mtok":0.10}', 100, 1),
-    ('glm-official:glm-4.7-flash', 'glm-official', 'glm-4.7-flash', 'glm-4.7-flash', 'metered', '{"mode":"per_token","currency":"CNY","input_per_mtok":0.0,"output_per_mtok":0.0,"cache_read_per_mtok":0.0}', 100, 1),
-    -- Kimi (CNY)
-    ('kimi-official:kimi-k2.6', 'kimi-official', 'kimi-k2.6', 'kimi-k2.6', 'metered', '{"mode":"per_token","currency":"CNY","input_per_mtok":6.50,"output_per_mtok":27.0,"cache_read_per_mtok":1.10}', 100, 1),
-    ('kimi-official:kimi-k2.5', 'kimi-official', 'kimi-k2.5', 'kimi-k2.5', 'metered', '{"mode":"per_token","currency":"CNY","input_per_mtok":4.0,"output_per_mtok":21.0,"cache_read_per_mtok":0.70}', 100, 1),
-    -- MiniMax (CNY)
-    ('minimax-official:minimax-m2.7', 'minimax-official', 'minimax-m2.7', 'minimax-m2.7', 'metered', '{"mode":"per_token","currency":"CNY","input_per_mtok":2.10,"output_per_mtok":8.40,"cache_write_per_mtok":2.625,"cache_read_per_mtok":0.42}', 100, 1),
-    ('minimax-official:minimax-m2.7-highspeed', 'minimax-official', 'minimax-m2.7-highspeed', 'minimax-m2.7-highspeed', 'metered', '{"mode":"per_token","currency":"CNY","input_per_mtok":4.20,"output_per_mtok":16.80,"cache_write_per_mtok":2.625,"cache_read_per_mtok":0.42}', 100, 1),
-    ('minimax-official:minimax-m2.5', 'minimax-official', 'minimax-m2.5', 'minimax-m2.5', 'metered', '{"mode":"per_token","currency":"CNY","input_per_mtok":2.10,"output_per_mtok":8.40,"cache_write_per_mtok":2.625,"cache_read_per_mtok":0.21}', 100, 1),
-    ('minimax-official:minimax-m2.5-highspeed', 'minimax-official', 'minimax-m2.5-highspeed', 'minimax-m2.5-highspeed', 'metered', '{"mode":"per_token","currency":"CNY","input_per_mtok":4.20,"output_per_mtok":16.80,"cache_write_per_mtok":2.625,"cache_read_per_mtok":0.21}', 100, 1),
-    -- DashScope Token Plan (10 models × 2 protocols)
-    -- Qwen models
-    ('dashscope-token-openai:qwen3.7-max', 'dashscope-token-openai', 'qwen3.7-max', 'qwen3.7-max', 'metered', '{"mode":"per_token","currency":"CNY","input_per_mtok":6.0,"output_per_mtok":18.0,"cache_write_per_mtok":7.50,"cache_read_per_mtok":1.20}', 100, 1),
-    ('dashscope-token-openai:qwen3.6-plus', 'dashscope-token-openai', 'qwen3.6-plus', 'qwen3.6-plus', 'metered', '{"mode":"per_token","currency":"CNY","input_per_mtok":2.0,"output_per_mtok":12.0,"cache_write_per_mtok":2.50,"cache_read_per_mtok":0.20}', 100, 1),
-    ('dashscope-token-openai:qwen3.6-flash', 'dashscope-token-openai', 'qwen3.6-flash', 'qwen3.6-flash', 'metered', '{"mode":"per_token","currency":"CNY","input_per_mtok":1.20,"output_per_mtok":7.20,"cache_write_per_mtok":1.50,"cache_read_per_mtok":0.12}', 100, 1),
-    -- DeepSeek models
-    ('dashscope-token-openai:deepseek-v4-pro', 'dashscope-token-openai', 'deepseek-v4-pro', 'deepseek-v4-pro', 'metered', '{"mode":"per_token","currency":"CNY","input_per_mtok":3.0,"output_per_mtok":6.0,"cache_read_per_mtok":0.025}', 100, 1),
-    ('dashscope-token-openai:deepseek-v4-flash', 'dashscope-token-openai', 'deepseek-v4-flash', 'deepseek-v4-flash', 'metered', '{"mode":"per_token","currency":"CNY","input_per_mtok":1.0,"output_per_mtok":2.0,"cache_read_per_mtok":0.02}', 100, 1),
-    -- Kimi models
-    ('dashscope-token-openai:kimi-k2.6', 'dashscope-token-openai', 'kimi-k2.6', 'kimi-k2.6', 'metered', '{"mode":"per_token","currency":"CNY","input_per_mtok":6.50,"output_per_mtok":27.0,"cache_read_per_mtok":1.10}', 100, 1),
-    ('dashscope-token-openai:kimi-k2.5', 'dashscope-token-openai', 'kimi-k2.5', 'kimi-k2.5', 'metered', '{"mode":"per_token","currency":"CNY","input_per_mtok":4.0,"output_per_mtok":21.0,"cache_read_per_mtok":0.70}', 100, 1),
-    -- GLM models
-    ('dashscope-token-openai:glm-5.1', 'dashscope-token-openai', 'glm-5.1', 'glm-5.1', 'metered', '{"mode":"per_token","currency":"CNY","input_per_mtok":6.0,"output_per_mtok":24.0,"cache_read_per_mtok":1.30}', 100, 1),
-    ('dashscope-token-openai:glm-5', 'dashscope-token-openai', 'glm-5', 'glm-5', 'metered', '{"mode":"per_token","currency":"CNY","input_per_mtok":4.0,"output_per_mtok":18.0,"cache_read_per_mtok":1.0}', 100, 1),
-    -- MiniMax models
-    ('dashscope-token-openai:minimax-m2.5', 'dashscope-token-openai', 'minimax-m2.5', 'minimax-m2.5', 'metered', '{"mode":"per_token","currency":"CNY","input_per_mtok":2.10,"output_per_mtok":8.40,"cache_write_per_mtok":2.625,"cache_read_per_mtok":0.21}', 100, 1),
-    -- Same models for Token Plan Anthropic protocol
-    ('dashscope-token-anthropic:qwen3.7-max', 'dashscope-token-anthropic', 'qwen3.7-max', 'qwen3.7-max', 'metered', '{"mode":"per_token","currency":"CNY","input_per_mtok":6.0,"output_per_mtok":18.0,"cache_write_per_mtok":7.50,"cache_read_per_mtok":1.20}', 100, 1),
-    ('dashscope-token-anthropic:qwen3.6-plus', 'dashscope-token-anthropic', 'qwen3.6-plus', 'qwen3.6-plus', 'metered', '{"mode":"per_token","currency":"CNY","input_per_mtok":2.0,"output_per_mtok":12.0,"cache_write_per_mtok":2.50,"cache_read_per_mtok":0.20}', 100, 1),
-    ('dashscope-token-anthropic:qwen3.6-flash', 'dashscope-token-anthropic', 'qwen3.6-flash', 'qwen3.6-flash', 'metered', '{"mode":"per_token","currency":"CNY","input_per_mtok":1.20,"output_per_mtok":7.20,"cache_write_per_mtok":1.50,"cache_read_per_mtok":0.12}', 100, 1),
-    ('dashscope-token-anthropic:deepseek-v4-pro', 'dashscope-token-anthropic', 'deepseek-v4-pro', 'deepseek-v4-pro', 'metered', '{"mode":"per_token","currency":"CNY","input_per_mtok":3.0,"output_per_mtok":6.0,"cache_read_per_mtok":0.025}', 100, 1),
-    ('dashscope-token-anthropic:deepseek-v4-flash', 'dashscope-token-anthropic', 'deepseek-v4-flash', 'deepseek-v4-flash', 'metered', '{"mode":"per_token","currency":"CNY","input_per_mtok":1.0,"output_per_mtok":2.0,"cache_read_per_mtok":0.02}', 100, 1),
-    ('dashscope-token-anthropic:kimi-k2.6', 'dashscope-token-anthropic', 'kimi-k2.6', 'kimi-k2.6', 'metered', '{"mode":"per_token","currency":"CNY","input_per_mtok":6.50,"output_per_mtok":27.0,"cache_read_per_mtok":1.10}', 100, 1),
-    ('dashscope-token-anthropic:kimi-k2.5', 'dashscope-token-anthropic', 'kimi-k2.5', 'kimi-k2.5', 'metered', '{"mode":"per_token","currency":"CNY","input_per_mtok":4.0,"output_per_mtok":21.0,"cache_read_per_mtok":0.70}', 100, 1),
-    ('dashscope-token-anthropic:glm-5.1', 'dashscope-token-anthropic', 'glm-5.1', 'glm-5.1', 'metered', '{"mode":"per_token","currency":"CNY","input_per_mtok":6.0,"output_per_mtok":24.0,"cache_read_per_mtok":1.30}', 100, 1),
-    ('dashscope-token-anthropic:glm-5', 'dashscope-token-anthropic', 'glm-5', 'glm-5', 'metered', '{"mode":"per_token","currency":"CNY","input_per_mtok":4.0,"output_per_mtok":18.0,"cache_read_per_mtok":1.0}', 100, 1),
-    ('dashscope-token-anthropic:minimax-m2.5', 'dashscope-token-anthropic', 'minimax-m2.5', 'minimax-m2.5', 'metered', '{"mode":"per_token","currency":"CNY","input_per_mtok":2.10,"output_per_mtok":8.40,"cache_write_per_mtok":2.625,"cache_read_per_mtok":0.21}', 100, 1),
-    -- DashScope Coding Plan (5 models × 2 protocols)
-    ('dashscope-coding-openai:qwen3.6-plus', 'dashscope-coding-openai', 'qwen3.6-plus', 'qwen3.6-plus', 'metered', '{"mode":"per_token","currency":"CNY","input_per_mtok":2.0,"output_per_mtok":12.0,"cache_write_per_mtok":2.50,"cache_read_per_mtok":0.20}', 100, 1),
-    ('dashscope-coding-openai:qwen3.5-plus', 'dashscope-coding-openai', 'qwen3.5-plus', 'qwen3.5-plus', 'metered', '{"mode":"per_token","currency":"CNY","input_per_mtok":0.80,"output_per_mtok":4.80,"cache_write_per_mtok":1.0,"cache_read_per_mtok":0.08}', 100, 1),
-    ('dashscope-coding-openai:glm-5', 'dashscope-coding-openai', 'glm-5', 'glm-5', 'metered', '{"mode":"per_token","currency":"CNY","input_per_mtok":4.0,"output_per_mtok":18.0,"cache_read_per_mtok":1.0}', 100, 1),
-    ('dashscope-coding-openai:kimi-k2.5', 'dashscope-coding-openai', 'kimi-k2.5', 'kimi-k2.5', 'metered', '{"mode":"per_token","currency":"CNY","input_per_mtok":4.0,"output_per_mtok":21.0,"cache_read_per_mtok":0.70}', 100, 1),
-    ('dashscope-coding-openai:minimax-m2.5', 'dashscope-coding-openai', 'minimax-m2.5', 'minimax-m2.5', 'metered', '{"mode":"per_token","currency":"CNY","input_per_mtok":2.10,"output_per_mtok":8.40,"cache_write_per_mtok":2.625,"cache_read_per_mtok":0.21}', 100, 1),
-    ('dashscope-coding-anthropic:qwen3.6-plus', 'dashscope-coding-anthropic', 'qwen3.6-plus', 'qwen3.6-plus', 'metered', '{"mode":"per_token","currency":"CNY","input_per_mtok":2.0,"output_per_mtok":12.0,"cache_write_per_mtok":2.50,"cache_read_per_mtok":0.20}', 100, 1),
-    ('dashscope-coding-anthropic:qwen3.5-plus', 'dashscope-coding-anthropic', 'qwen3.5-plus', 'qwen3.5-plus', 'metered', '{"mode":"per_token","currency":"CNY","input_per_mtok":0.80,"output_per_mtok":4.80,"cache_write_per_mtok":1.0,"cache_read_per_mtok":0.08}', 100, 1),
-    ('dashscope-coding-anthropic:glm-5', 'dashscope-coding-anthropic', 'glm-5', 'glm-5', 'metered', '{"mode":"per_token","currency":"CNY","input_per_mtok":4.0,"output_per_mtok":18.0,"cache_read_per_mtok":1.0}', 100, 1),
-    ('dashscope-coding-anthropic:kimi-k2.5', 'dashscope-coding-anthropic', 'kimi-k2.5', 'kimi-k2.5', 'metered', '{"mode":"per_token","currency":"CNY","input_per_mtok":4.0,"output_per_mtok":21.0,"cache_read_per_mtok":0.70}', 100, 1),
-    ('dashscope-coding-anthropic:minimax-m2.5', 'dashscope-coding-anthropic', 'minimax-m2.5', 'minimax-m2.5', 'metered', '{"mode":"per_token","currency":"CNY","input_per_mtok":2.10,"output_per_mtok":8.40,"cache_write_per_mtok":2.625,"cache_read_per_mtok":0.21}', 100, 1),
-    -- DashScope Coding Plan Pro (FlatFee ¥200/月, 90,000 次/月)
-    ('dashscope-coding-openai:pro:qwen3.6-plus', 'dashscope-coding-openai', 'qwen3.6-plus', 'qwen3.6-plus', 'flatfee', '{"monthly_cost_hint":200.0,"quota":{"MaxRequests":{"per_month":90000}},"on_exhausted":"block"}', 200, 1),
-    ('dashscope-coding-openai:pro:kimi-k2.5', 'dashscope-coding-openai', 'kimi-k2.5', 'kimi-k2.5', 'flatfee', '{"monthly_cost_hint":200.0,"quota":{"MaxRequests":{"per_month":90000}},"on_exhausted":"block"}', 200, 1),
-    ('dashscope-coding-openai:pro:glm-5', 'dashscope-coding-openai', 'glm-5', 'glm-5', 'flatfee', '{"monthly_cost_hint":200.0,"quota":{"MaxRequests":{"per_month":90000}},"on_exhausted":"block"}', 200, 1),
-    ('dashscope-coding-openai:pro:minimax-m2.5', 'dashscope-coding-openai', 'minimax-m2.5', 'minimax-m2.5', 'flatfee', '{"monthly_cost_hint":200.0,"quota":{"MaxRequests":{"per_month":90000}},"on_exhausted":"block"}', 200, 1),
-    ('dashscope-coding-openai:pro:qwen3.5-plus', 'dashscope-coding-openai', 'qwen3.5-plus', 'qwen3.5-plus', 'flatfee', '{"monthly_cost_hint":200.0,"quota":{"MaxRequests":{"per_month":90000}},"on_exhausted":"block"}', 200, 1),
-    ('dashscope-coding-openai:pro:glm-4.7', 'dashscope-coding-openai', 'glm-4.7', 'glm-4.7', 'flatfee', '{"monthly_cost_hint":200.0,"quota":{"MaxRequests":{"per_month":90000}},"on_exhausted":"block"}', 200, 1),
-    ('dashscope-coding-anthropic:pro:qwen3.6-plus', 'dashscope-coding-anthropic', 'qwen3.6-plus', 'qwen3.6-plus', 'flatfee', '{"monthly_cost_hint":200.0,"quota":{"MaxRequests":{"per_month":90000}},"on_exhausted":"block"}', 200, 1),
-    ('dashscope-coding-anthropic:pro:kimi-k2.5', 'dashscope-coding-anthropic', 'kimi-k2.5', 'kimi-k2.5', 'flatfee', '{"monthly_cost_hint":200.0,"quota":{"MaxRequests":{"per_month":90000}},"on_exhausted":"block"}', 200, 1),
-    ('dashscope-coding-anthropic:pro:glm-5', 'dashscope-coding-anthropic', 'glm-5', 'glm-5', 'flatfee', '{"monthly_cost_hint":200.0,"quota":{"MaxRequests":{"per_month":90000}},"on_exhausted":"block"}', 200, 1),
-    ('dashscope-coding-anthropic:pro:minimax-m2.5', 'dashscope-coding-anthropic', 'minimax-m2.5', 'minimax-m2.5', 'flatfee', '{"monthly_cost_hint":200.0,"quota":{"MaxRequests":{"per_month":90000}},"on_exhausted":"block"}', 200, 1),
-    ('dashscope-coding-anthropic:pro:qwen3.5-plus', 'dashscope-coding-anthropic', 'qwen3.5-plus', 'qwen3.5-plus', 'flatfee', '{"monthly_cost_hint":200.0,"quota":{"MaxRequests":{"per_month":90000}},"on_exhausted":"block"}', 200, 1),
-    ('dashscope-coding-anthropic:pro:glm-4.7', 'dashscope-coding-anthropic', 'glm-4.7', 'glm-4.7', 'flatfee', '{"monthly_cost_hint":200.0,"quota":{"MaxRequests":{"per_month":90000}},"on_exhausted":"block"}', 200, 1);
+    -- DeepSeek
+    ('deepseek:deepseek-v4-flash', 'deepseek', 'deepseek-v4-flash', 'deepseek-v4-flash', 'metered', '{"type":"per_token","currency":"CNY","input_per_mtok":1.0,"output_per_mtok":2.0,"cache_read_per_mtok":0.02}', 100, 1),
+    ('deepseek:deepseek-v4-pro', 'deepseek', 'deepseek-v4-pro', 'deepseek-v4-pro', 'metered', '{"type":"per_token","currency":"CNY","input_per_mtok":3.0,"output_per_mtok":6.0,"cache_read_per_mtok":0.025}', 100, 1),
+    -- DashScope Token Plan
+    ('dashscope-token:qwen3.6-plus', 'dashscope-token', 'qwen3.6-plus', 'qwen3.6-plus', 'metered', '{"type":"per_token","currency":"CNY","input_per_mtok":2.0,"output_per_mtok":12.0,"cache_write_per_mtok":2.50,"cache_read_per_mtok":0.20}', 100, 1),
+    ('dashscope-token:deepseek-v4-flash', 'dashscope-token', 'deepseek-v4-flash', 'deepseek-v4-flash', 'metered', '{"type":"per_token","currency":"CNY","input_per_mtok":1.0,"output_per_mtok":2.0,"cache_read_per_mtok":0.02}', 100, 1),
+    ('dashscope-token:glm-5', 'dashscope-token', 'glm-5', 'glm-5', 'metered', '{"type":"per_token","currency":"CNY","input_per_mtok":4.0,"output_per_mtok":18.0,"cache_read_per_mtok":1.0}', 100, 1),
+    ('dashscope-token:kimi-k2.5', 'dashscope-token', 'kimi-k2.5', 'kimi-k2.5', 'metered', '{"type":"per_token","currency":"CNY","input_per_mtok":4.0,"output_per_mtok":21.0,"cache_read_per_mtok":0.70}', 100, 1),
+    ('dashscope-token:minimax-m2.7', 'dashscope-token', 'minimax-m2.7', 'minimax-m2.7', 'metered', '{"type":"per_token","currency":"CNY","input_per_mtok":2.10,"output_per_mtok":8.40,"cache_write_per_mtok":2.625,"cache_read_per_mtok":0.42}', 100, 1),
+    -- DashScope Coding Plan (metered)
+    ('dashscope-coding:qwen3.6-plus', 'dashscope-coding', 'qwen3.6-plus', 'qwen3.6-plus', 'metered', '{"type":"per_token","currency":"CNY","input_per_mtok":2.0,"output_per_mtok":12.0,"cache_write_per_mtok":2.50,"cache_read_per_mtok":0.20}', 100, 1),
+    ('dashscope-coding:qwen3.5-plus', 'dashscope-coding', 'qwen3.5-plus', 'qwen3.5-plus', 'metered', '{"type":"per_token","currency":"CNY","input_per_mtok":0.80,"output_per_mtok":4.80,"cache_write_per_mtok":1.0,"cache_read_per_mtok":0.08}', 100, 1),
+    ('dashscope-coding:glm-5', 'dashscope-coding', 'glm-5', 'glm-5', 'metered', '{"type":"per_token","currency":"CNY","input_per_mtok":4.0,"output_per_mtok":18.0,"cache_read_per_mtok":1.0}', 100, 1),
+    ('dashscope-coding:kimi-k2.5', 'dashscope-coding', 'kimi-k2.5', 'kimi-k2.5', 'metered', '{"type":"per_token","currency":"CNY","input_per_mtok":4.0,"output_per_mtok":21.0,"cache_read_per_mtok":0.70}', 100, 1),
+    ('dashscope-coding:minimax-m2.7', 'dashscope-coding', 'minimax-m2.7', 'minimax-m2.7', 'metered', '{"type":"per_token","currency":"CNY","input_per_mtok":2.10,"output_per_mtok":8.40,"cache_write_per_mtok":2.625,"cache_read_per_mtok":0.42}', 100, 1),
+    ('dashscope-coding:glm-4.7-flash', 'dashscope-coding', 'glm-4.7-flash', 'glm-4.7-flash', 'metered', '{"type":"per_token","currency":"CNY","input_per_mtok":0.0,"output_per_mtok":0.0,"cache_read_per_mtok":0.0}', 100, 1),
+    -- DashScope Pay-as-you-go
+    ('dashscope-payg:qwen3.7-max', 'dashscope-payg', 'qwen3.7-max', 'qwen3.7-max', 'metered', '{"type":"per_token","currency":"CNY","input_per_mtok":6.0,"output_per_mtok":18.0,"cache_write_per_mtok":7.50,"cache_read_per_mtok":1.20}', 100, 1),
+    ('dashscope-payg:qwen3.6-max', 'dashscope-payg', 'qwen3.6-max', 'qwen3.6-max', 'metered', '{"type":"per_token","currency":"CNY","input_per_mtok":9.0,"output_per_mtok":54.0,"cache_write_per_mtok":11.25,"cache_read_per_mtok":0.90}', 100, 1),
+    ('dashscope-payg:qwen3.6-plus', 'dashscope-payg', 'qwen3.6-plus', 'qwen3.6-plus', 'metered', '{"type":"per_token","currency":"CNY","input_per_mtok":2.0,"output_per_mtok":12.0,"cache_write_per_mtok":2.50,"cache_read_per_mtok":0.20}', 100, 1),
+    ('dashscope-payg:qwen3.6-flash', 'dashscope-payg', 'qwen3.6-flash', 'qwen3.6-flash', 'metered', '{"type":"per_token","currency":"CNY","input_per_mtok":1.20,"output_per_mtok":7.20,"cache_write_per_mtok":1.50,"cache_read_per_mtok":0.12}', 100, 1),
+    ('dashscope-payg:qwen3.5-plus', 'dashscope-payg', 'qwen3.5-plus', 'qwen3.5-plus', 'metered', '{"type":"per_token","currency":"CNY","input_per_mtok":0.80,"output_per_mtok":4.80,"cache_write_per_mtok":1.0,"cache_read_per_mtok":0.08}', 100, 1),
+    ('dashscope-payg:qwen3.5-flash', 'dashscope-payg', 'qwen3.5-flash', 'qwen3.5-flash', 'metered', '{"type":"per_token","currency":"CNY","input_per_mtok":0.20,"output_per_mtok":2.0,"cache_write_per_mtok":0.25,"cache_read_per_mtok":0.02}', 100, 1),
+    -- Zhipu GLM
+    ('glm-official:glm-5.1', 'glm-official', 'glm-5.1', 'glm-5.1', 'metered', '{"type":"per_token","currency":"CNY","input_per_mtok":6.0,"output_per_mtok":24.0,"cache_read_per_mtok":1.30}', 100, 1),
+    ('glm-official:glm-5-turbo', 'glm-official', 'glm-5-turbo', 'glm-5-turbo', 'metered', '{"type":"per_token","currency":"CNY","input_per_mtok":5.0,"output_per_mtok":22.0,"cache_read_per_mtok":1.20}', 100, 1),
+    ('glm-official:glm-5', 'glm-official', 'glm-5', 'glm-5', 'metered', '{"type":"per_token","currency":"CNY","input_per_mtok":4.0,"output_per_mtok":18.0,"cache_read_per_mtok":1.0}', 100, 1),
+    ('glm-official:glm-4.7-flash', 'glm-official', 'glm-4.7-flash', 'glm-4.7-flash', 'metered', '{"type":"per_token","currency":"CNY","input_per_mtok":0.0,"output_per_mtok":0.0,"cache_read_per_mtok":0.0}', 100, 1),
+    -- Kimi
+    ('kimi-official:kimi-k2.6', 'kimi-official', 'kimi-k2.6', 'kimi-k2.6', 'metered', '{"type":"per_token","currency":"CNY","input_per_mtok":6.50,"output_per_mtok":27.0,"cache_read_per_mtok":1.10}', 100, 1),
+    ('kimi-official:kimi-k2.5', 'kimi-official', 'kimi-k2.5', 'kimi-k2.5', 'metered', '{"type":"per_token","currency":"CNY","input_per_mtok":4.0,"output_per_mtok":21.0,"cache_read_per_mtok":0.70}', 100, 1),
+    -- MiniMax
+    ('minimax-official:minimax-m2.7', 'minimax-official', 'minimax-m2.7', 'minimax-m2.7', 'metered', '{"type":"per_token","currency":"CNY","input_per_mtok":2.10,"output_per_mtok":8.40,"cache_write_per_mtok":2.625,"cache_read_per_mtok":0.42}', 100, 1);

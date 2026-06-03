@@ -16,10 +16,14 @@ agent-proxy-rust-core = { workspace = true }
 anyhow = { workspace = true }
 async-trait = "0.1"
 bytes = "1"
+futures = "0.3"
+http = "1"
 serde = { workspace = true }
 serde_json = { workspace = true }
+tokio = { workspace = true, features = ["sync"] }
+tokio-stream = "0.1"
 tracing = { workspace = true }
-llm-bridge-core = { path = "../../../llm-bridge-rust/crates/core" }
+llm-bridge-core = { workspace = true }
 
 [dev-dependencies]
 http = "1"

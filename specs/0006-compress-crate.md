@@ -14,7 +14,7 @@ CompressMiddleware.on_request()
   ├── Parse request body
   ├── Extract tool definitions from messages
   ├── SchemaCompressor::compress(tools) → compact tool schemas (~4500 tokens)
-  ├── Inject compression metadata into ctx.extensions (StatsRecord)
+  ├── Inject compression metadata into ctx.extensions (CompressionStats)
   └── Return modified request body
         │
         ▼
@@ -27,7 +27,7 @@ Upstream Response (~800 tokens)
 CompressMiddleware.on_response()   [non-streaming only]
   ├── Parse response body
   ├── ResponseCompressor::compress(response) → shorthanded response (~600 tokens)
-  ├── Update StatsRecord in ctx.extensions
+  ├── Update CompressionStats in ctx.extensions
   └── Return modified response body
         │
         ▼
@@ -38,7 +38,7 @@ Client receives compressed response (semantically identical, fewer tokens)
 
 ```rust
 // compress crate depends on tokenless-schema
-use tokenless_schema::{SchemaCompressor, ResponseCompressor, StatsRecord};
+use tokenless_schema::{SchemaCompressor, ResponseCompressor, CompressionStats};
 
 pub struct CompressMiddleware {
     schema_compressor: SchemaCompressor,
@@ -57,8 +57,8 @@ The middleware extracts tool definitions from the request body based on detected
 After extraction:
 
 ```rust
-fn compress_request(req: &mut ProxyRequest, compressor: &SchemaCompressor) -> Result<StatsRecord> {
-    let mut stats = StatsRecord::default();
+fn compress_request(req: &mut ProxyRequest, compressor: &SchemaCompressor) -> Result<CompressionStats> {
+    let mut stats = CompressionStats::default();
 
     // 1. Count tokens before compression
     stats.pre_compress_tokens = token_counter::count(&req.body);
@@ -92,12 +92,12 @@ Non-streaming only. The `ResponseCompressor` applies shorthand replacements:
 - Verbose content blocks → concise equivalents
 
 ```rust
-fn compress_response(res: &mut ProxyResponse, compressor: &ResponseCompressor) -> Result<StatsRecord> {
+fn compress_response(res: &mut ProxyResponse, compressor: &ResponseCompressor) -> Result<CompressionStats> {
     let pre_tokens = token_counter::count(&res.body);
     let compressed = compressor.compress(&res.body)?;
     let post_tokens = token_counter::count(&compressed);
     res.body = compressed.into();
-    Ok(StatsRecord {
+    Ok(CompressionStats {
         pre_compress_tokens: pre_tokens,
         post_compress_tokens: post_tokens,
         compression_tokens_saved: pre_tokens.saturating_sub(post_tokens),
@@ -114,11 +114,11 @@ Streaming responses are NOT compressed:
 
 `compression_tokens_saved` is set to 0 for streaming requests in the response stats.
 
-## StatsRecord
+## CompressionStats
 
 ```rust
 /// Written to ctx.extensions by CompressMiddleware, read by CostMiddleware.
-pub struct StatsRecord {
+pub struct CompressionStats {
     /// Total tokens before any compression (request + response).
     pub pre_compress_tokens: u64,
     /// Total tokens after compression (request + response).
@@ -163,15 +163,15 @@ Compression failures must never block the request. If compression fails:
 
 1. Log a warning with the error details.
 2. Pass the uncompressed body through.
-3. Set `StatsRecord` with `pre = post` and `saved = 0`.
+3. Set `CompressionStats` with `pre = post` and `saved = 0`.
 
 ```rust
-fn compress_or_passthrough(req: &mut ProxyRequest, compressor: &SchemaCompressor) -> StatsRecord {
+fn compress_or_passthrough(req: &mut ProxyRequest, compressor: &SchemaCompressor) -> CompressionStats {
     match compress_request(req, compressor) {
         Ok(stats) => stats,
         Err(e) => {
             tracing::warn!(error = %e, "schema compression failed, passing through uncompressed");
-            StatsRecord::default()
+            CompressionStats::default()
         }
     }
 }

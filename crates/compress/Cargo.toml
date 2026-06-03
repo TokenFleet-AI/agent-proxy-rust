@@ -12,6 +12,8 @@ agent-proxy-rust-core = { path = "../core" }
 tokenless-schema = { path = "../../../tokenless/crates/tokenless-schema" }
 async-trait = "0.1"
 bytes = "1"
+chrono = "0.4"
+dirs = "6"
 serde_json = { workspace = true }
 tracing = { workspace = true }
 

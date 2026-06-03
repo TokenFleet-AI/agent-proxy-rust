@@ -23,6 +23,8 @@ const MIGRATION_V1: &str = include_str!("../migrations/001_init.sql");
 const MIGRATION_V2: &str = include_str!("../migrations/002_health_fields.sql");
 const MIGRATION_V3: &str = include_str!("../migrations/003_savings_fields.sql");
 const MIGRATION_V4: &str = include_str!("../migrations/004_switch_logs_auth.sql");
+const MIGRATION_V5: &str = include_str!("../migrations/005_pricing_snapshot.sql");
+const MIGRATION_V6: &str = include_str!("../migrations/006_billing_correlation.sql");
 
 /// SQLite-backed storage implementation.
 ///
@@ -44,7 +46,7 @@ impl SqliteStorage {
     pub fn new(path: &std::path::Path) -> Result<Self, StorageError> {
         let manager = SqliteConnectionManager::file(path);
         let pool = Pool::builder()
-            .max_size(1)
+            .max_size(4)
             .build(manager)
             .map_err(|e| StorageError::Connection(format!("failed to create pool: {e}")))?;
         debug!(path = %path.display(), "SQLite database opened");
@@ -61,7 +63,7 @@ impl SqliteStorage {
     pub fn new_in_memory() -> Result<Self, StorageError> {
         let manager = SqliteConnectionManager::memory();
         let pool = Pool::builder()
-            .max_size(1)
+            .max_size(4)
             .build(manager)
             .map_err(|e| StorageError::Connection(format!("failed to create pool: {e}")))?;
         debug!("SQLite in-memory database opened");
@@ -85,24 +87,25 @@ impl SqliteStorage {
             base_url: row.get(2)?,
             api_key: SecretString::new(row.get::<_, String>(3)?.into_boxed_str()),
             protocol: row.get(4)?,
-            is_builtin: row.get(5)?,
-            enabled: row.get(6)?,
-            created_at: row.get(7)?,
-            updated_at: row.get(8)?,
-            health_status: row.get(9)?,
-            cooldown_until: row.get(10)?,
-            consecutive_failures: row.get(11)?,
-            billing_type: row.get(12)?,
-            monthly_quota: row.get(13)?,
-            quota_policy: row.get(14)?,
-            priority: row.get(15)?,
+            protocols: row.get::<_, String>(5).unwrap_or_default(),
+            is_builtin: row.get(6)?,
+            enabled: row.get(7)?,
+            created_at: row.get(8)?,
+            updated_at: row.get(9)?,
+            health_status: row.get(10)?,
+            cooldown_until: row.get(11)?,
+            consecutive_failures: row.get(12)?,
+            billing_type: row.get(13)?,
+            monthly_quota: row.get(14)?,
+            quota_policy: row.get(15)?,
+            priority: row.get(16)?,
         })
     }
 
-    const CHANNEL_COLS: &'static str = "id, name, url, api_key, protocol, is_builtin, enabled, \
-                                        created_at, updated_at, health_status, cooldown_until, \
-                                        consecutive_failures, billing_type, monthly_quota, \
-                                        quota_policy, priority";
+    const CHANNEL_COLS: &'static str = "id, name, url, api_key, protocol, protocols, is_builtin, \
+                                        enabled, created_at, updated_at, health_status, \
+                                        cooldown_until, consecutive_failures, billing_type, \
+                                        monthly_quota, quota_policy, priority";
 }
 
 #[async_trait]
@@ -116,13 +119,21 @@ impl Storage for SqliteStorage {
                 .get()
                 .map_err(|e| StorageError::Connection(e.to_string()))?;
             let mut stmt = conn
-                .prepare("SELECT id, name FROM providers ORDER BY id")
+                .prepare("SELECT id, name, created_at FROM providers ORDER BY id")
                 .map_err(|e| StorageError::Backend(e.to_string()))?;
             let rows = stmt
                 .query_map([], |row| {
                     Ok(Provider {
                         id: row.get(0)?,
                         name: row.get(1)?,
+                        created_at: row.get::<_, i64>(2).map_or_else(
+                            |_| String::new(),
+                            |ts| {
+                                chrono::DateTime::from_timestamp(ts, 0)
+                                    .unwrap_or_default()
+                                    .to_rfc3339()
+                            },
+                        ),
                     })
                 })
                 .map_err(|e| StorageError::Backend(e.to_string()))?;
@@ -144,13 +155,21 @@ impl Storage for SqliteStorage {
                 .get()
                 .map_err(|e| StorageError::Connection(e.to_string()))?;
             let mut stmt = conn
-                .prepare("SELECT id, name FROM providers WHERE id = ?1")
+                .prepare("SELECT id, name, created_at FROM providers WHERE id = ?1")
                 .map_err(|e| StorageError::Backend(e.to_string()))?;
             let mut rows = stmt
                 .query_map(params![id], |row| {
                     Ok(Provider {
                         id: row.get(0)?,
                         name: row.get(1)?,
+                        created_at: row.get::<_, i64>(2).map_or_else(
+                            |_| String::new(),
+                            |ts| {
+                                chrono::DateTime::from_timestamp(ts, 0)
+                                    .unwrap_or_default()
+                                    .to_rfc3339()
+                            },
+                        ),
                     })
                 })
                 .map_err(|e| StorageError::Backend(e.to_string()))?;
@@ -175,13 +194,17 @@ impl Storage for SqliteStorage {
                 .map_err(|e| StorageError::Connection(e.to_string()))?;
             let (sql, param_values): (&str, Vec<String>) = match &provider_id {
                 Some(pid) => (
-                    "SELECT DISTINCT id, channel_id, client_name, 'USD' FROM model_mappings WHERE \
-                     channel_id = ?1 ORDER BY id",
+                    "SELECT m.id, m.provider_id, m.client_name, m.price_input, m.price_output, \
+                     m.currency, m.context_window, m.created_at, \
+                     COALESCE((SELECT COUNT(*) FROM model_mappings WHERE client_name = m.client_name), 0) as channel_count \
+                     FROM models m WHERE m.provider_id = ?1 ORDER BY m.client_name",
                     vec![pid.clone()],
                 ),
                 None => (
-                    "SELECT DISTINCT id, channel_id, client_name, 'USD' FROM model_mappings ORDER \
-                     BY id",
+                    "SELECT m.id, m.provider_id, m.client_name, m.price_input, m.price_output, \
+                     m.currency, m.context_window, m.created_at, \
+                     COALESCE((SELECT COUNT(*) FROM model_mappings WHERE client_name = m.client_name), 0) as channel_count \
+                     FROM models m ORDER BY m.provider_id, m.client_name",
                     vec![],
                 ),
             };
@@ -198,7 +221,16 @@ impl Storage for SqliteStorage {
                         id: row.get(0)?,
                         provider_id: row.get(1)?,
                         client_name: row.get(2)?,
-                        currency: row.get(3)?,
+                        price_input: row.get(3)?,
+                        price_output: row.get(4)?,
+                        currency: row.get(5)?,
+                        context_window: row.get(6)?,
+                        created_at: row.get::<_, i64>(7).map(|ts| {
+                            chrono::DateTime::from_timestamp(ts, 0)
+                                .unwrap_or_default()
+                                .to_rfc3339()
+                        }).unwrap_or_default(),
+                        channel_count: row.get(8)?,
                     })
                 })
                 .map_err(|e| StorageError::Backend(e.to_string()))?;
@@ -221,7 +253,10 @@ impl Storage for SqliteStorage {
                 .map_err(|e| StorageError::Connection(e.to_string()))?;
             let mut stmt = conn
                 .prepare(
-                    "SELECT id, channel_id, client_name, 'USD' FROM model_mappings WHERE id = ?1",
+                    "SELECT m.id, m.provider_id, m.client_name, m.price_input, m.price_output, \
+                     m.currency, m.context_window, m.created_at, \
+                     COALESCE((SELECT COUNT(*) FROM model_mappings WHERE client_name = m.client_name), 0) \
+                     FROM models m WHERE m.id = ?1",
                 )
                 .map_err(|e| StorageError::Backend(e.to_string()))?;
             let mut rows = stmt
@@ -230,7 +265,16 @@ impl Storage for SqliteStorage {
                         id: row.get(0)?,
                         provider_id: row.get(1)?,
                         client_name: row.get(2)?,
-                        currency: row.get(3)?,
+                        price_input: row.get(3)?,
+                        price_output: row.get(4)?,
+                        currency: row.get(5)?,
+                        context_window: row.get(6)?,
+                        created_at: row.get::<_, i64>(7).map(|ts| {
+                            chrono::DateTime::from_timestamp(ts, 0)
+                                .unwrap_or_default()
+                                .to_rfc3339()
+                        }).unwrap_or_default(),
+                        channel_count: row.get(8)?,
                     })
                 })
                 .map_err(|e| StorageError::Backend(e.to_string()))?;
@@ -264,7 +308,7 @@ impl Storage for SqliteStorage {
                 ),
                 None => (
                     format!(
-                        "SELECT {} FROM channels ORDER BY id",
+                        "SELECT {} FROM channels ORDER BY CASE health_status WHEN 'Healthy' THEN 0 WHEN 'Degraded' THEN 1 WHEN 'Cooldown' THEN 2 ELSE 3 END, priority, id",
                         SqliteStorage::CHANNEL_COLS
                     ),
                     vec![],
@@ -323,6 +367,7 @@ impl Storage for SqliteStorage {
         let url = channel.base_url.clone();
         let api_key = channel.api_key.expose_secret().to_string();
         let protocol = channel.protocol.clone();
+        let protocols = channel.protocols.clone();
         let is_builtin = channel.is_builtin;
         let enabled = channel.enabled;
         let now = Self::now_unix();
@@ -338,15 +383,16 @@ impl Storage for SqliteStorage {
                 .get()
                 .map_err(|e| StorageError::Connection(e.to_string()))?;
             conn.execute(
-                "INSERT INTO channels (id, name, url, api_key, protocol, is_builtin, enabled, \
-                 created_at, updated_at, health_status, billing_type, monthly_quota, \
-                 quota_policy, priority)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)
+                "INSERT INTO channels (id, name, url, api_key, protocol, protocols, is_builtin, \
+                 enabled, created_at, updated_at, health_status, billing_type, \
+                 monthly_quota, quota_policy, priority)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)
                  ON CONFLICT(id) DO UPDATE SET
                    name = excluded.name,
                    url = excluded.url,
                    api_key = excluded.api_key,
                    protocol = excluded.protocol,
+                   protocols = excluded.protocols,
                    is_builtin = excluded.is_builtin,
                    enabled = excluded.enabled,
                    updated_at = excluded.updated_at,
@@ -361,6 +407,7 @@ impl Storage for SqliteStorage {
                     url,
                     api_key,
                     protocol,
+                    protocols,
                     is_builtin,
                     enabled,
                     now,
@@ -750,6 +797,37 @@ impl Storage for SqliteStorage {
         .map_err(|e| StorageError::Backend(format!("join error: {e}")))?
     }
 
+    async fn list_all_mappings(&self) -> Result<Vec<ModelMapping>, StorageError> {
+        let pool = self.get_pool();
+        tokio::task::spawn_blocking(move || {
+            let conn = pool.get().map_err(|e| StorageError::Connection(e.to_string()))?;
+            let mut stmt = conn
+                .prepare("SELECT id, channel_id, client_name, upstream_name, billing, pricing_json, weight, enabled FROM model_mappings ORDER BY channel_id, client_name")
+                .map_err(|e| StorageError::Backend(e.to_string()))?;
+            let rows = stmt
+                .query_map([], |row| {
+                    Ok(ModelMapping {
+                        id: row.get(0)?,
+                        channel_id: row.get(1)?,
+                        client_name: row.get(2)?,
+                        upstream_name: row.get(3)?,
+                        billing: row.get(4)?,
+                        pricing_json: row.get(5)?,
+                        weight: row.get(6)?,
+                        enabled: row.get(7)?,
+                    })
+                })
+                .map_err(|e| StorageError::Backend(e.to_string()))?;
+            let mut mappings = Vec::new();
+            for row in rows {
+                mappings.push(row.map_err(|e| StorageError::Backend(e.to_string()))?);
+            }
+            Ok(mappings)
+        })
+        .await
+        .map_err(|e| StorageError::Backend(format!("join error: {e}")))?
+    }
+
     // ── Cost Records ───────────────────────────────────────────────────
 
     async fn insert_cost_record(&self, record: &CostRecord) -> Result<(), StorageError> {
@@ -770,8 +848,14 @@ impl Storage for SqliteStorage {
         let pre_compress_tokens = record.pre_compress_tokens;
         let post_compress_tokens = record.post_compress_tokens;
         let compression_tokens_saved = record.compression_tokens_saved;
+        let pricing_snapshot_json = record.pricing_snapshot_json.clone();
         let unit = record.unit.clone();
         let timestamp = record.timestamp.clone();
+        let session_id = record.session_id.clone();
+        let before_tokens = record.before_tokens;
+        let after_tokens = record.after_tokens;
+        let tokens_saved = record.tokens_saved;
+        let compression_breakdown = record.compression_breakdown_json.clone();
         let pool = self.get_pool();
 
         tokio::task::spawn_blocking(move || {
@@ -785,8 +869,10 @@ impl Storage for SqliteStorage {
                   thinking_tokens, cost,
                   schema_saved_tokens, response_saved_tokens, rtk_saved_tokens,
                   pre_compress_tokens, post_compress_tokens, compression_tokens_saved,
-                  unit, timestamp)
-                 VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19)",
+                  unit, pricing_snapshot_json, timestamp,
+                  session_id, before_tokens, after_tokens, tokens_saved, compression_breakdown_json)
+                 VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,?20,
+                         ?21,?22,?23,?24,?25)",
                 params![
                     id,
                     channel_id,
@@ -806,7 +892,13 @@ impl Storage for SqliteStorage {
                     post_compress_tokens,
                     compression_tokens_saved,
                     unit,
+                    pricing_snapshot_json,
                     timestamp,
+                    session_id,
+                    before_tokens,
+                    after_tokens,
+                    tokens_saved,
+                    compression_breakdown,
                 ],
             )
             .map_err(|e| StorageError::Backend(e.to_string()))?;
@@ -833,7 +925,8 @@ impl Storage for SqliteStorage {
                         thinking_tokens, cost,
                         schema_saved_tokens, response_saved_tokens, rtk_saved_tokens,
                         pre_compress_tokens, post_compress_tokens, compression_tokens_saved,
-                        unit, timestamp
+                        unit, pricing_snapshot_json, timestamp,
+                        session_id, before_tokens, after_tokens, tokens_saved, compression_breakdown_json
                  FROM cost_records WHERE 1=1",
             );
             let mut param_values: Vec<Box<dyn rusqlite::types::ToSql>> = Vec::new();
@@ -891,7 +984,13 @@ impl Storage for SqliteStorage {
                         post_compress_tokens: row.get(15)?,
                         compression_tokens_saved: row.get(16)?,
                         unit: row.get(17)?,
-                        timestamp: row.get(18)?,
+                        pricing_snapshot_json: row.get(18)?,
+                        timestamp: row.get(19)?,
+                        session_id: row.get(20)?,
+                        before_tokens: row.get(21)?,
+                        after_tokens: row.get(22)?,
+                        tokens_saved: row.get(23)?,
+                        compression_breakdown_json: row.get(24)?,
                     })
                 })
                 .map_err(|e| StorageError::Backend(e.to_string()))?;
@@ -1151,7 +1250,15 @@ impl Storage for SqliteStorage {
                 conn.execute_batch(MIGRATION_V4)
                     .map_err(|e| StorageError::Migration(e.to_string()))?;
             }
-            conn.pragma_update(None, "user_version", 4)
+            if version < 5 {
+                conn.execute_batch(MIGRATION_V5)
+                    .map_err(|e| StorageError::Migration(e.to_string()))?;
+            }
+            if version < 6 {
+                conn.execute_batch(MIGRATION_V6)
+                    .map_err(|e| StorageError::Migration(e.to_string()))?;
+            }
+            conn.pragma_update(None, "user_version", 6)
                 .map_err(|e| StorageError::Migration(e.to_string()))?;
 
             Ok(())
@@ -1176,6 +1283,306 @@ impl Storage for SqliteStorage {
     }
 
     fn max_connections(&self) -> usize {
-        1
+        4
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
+mod tests {
+    use super::*;
+
+    /// Sync setup for non-async tests.
+    fn setup_in_memory() -> SqliteStorage {
+        let storage = SqliteStorage::new_in_memory().expect("failed to create in-memory storage");
+        tokio::runtime::Runtime::new()
+            .unwrap()
+            .block_on(storage.migrate())
+            .expect("migration failed");
+        storage
+    }
+
+    /// Async setup for `#[tokio::test]` tests.
+    async fn setup_in_memory_async() -> SqliteStorage {
+        let storage = SqliteStorage::new_in_memory().expect("failed to create in-memory storage");
+        storage.migrate().await.expect("migration failed");
+        storage
+    }
+
+    // ── Migration tests ──────────────────────────────────────────────
+
+    #[test]
+    fn test_providers_table_exists() {
+        let storage = setup_in_memory();
+        let pool = storage.get_pool();
+        let conn = pool.get().unwrap();
+
+        // Verify providers table exists by querying its schema
+        let count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='providers'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(count, 1, "providers table should exist");
+    }
+
+    #[test]
+    fn test_models_table_exists() {
+        let storage = setup_in_memory();
+        let pool = storage.get_pool();
+        let conn = pool.get().unwrap();
+
+        let count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='models'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(count, 1, "models table should exist");
+    }
+
+    #[test]
+    fn test_providers_table_has_correct_columns() {
+        let storage = setup_in_memory();
+        let pool = storage.get_pool();
+        let conn = pool.get().unwrap();
+
+        let mut stmt = conn.prepare("PRAGMA table_info('providers')").unwrap();
+        let columns: Vec<String> = stmt
+            .query_map([], |row| row.get::<_, String>(1))
+            .unwrap()
+            .filter_map(std::result::Result::ok)
+            .collect();
+
+        assert!(
+            columns.contains(&"id".to_string()),
+            "providers should have 'id' column"
+        );
+        assert!(
+            columns.contains(&"name".to_string()),
+            "providers should have 'name' column"
+        );
+        assert!(
+            columns.contains(&"created_at".to_string()),
+            "providers should have 'created_at' column"
+        );
+    }
+
+    #[test]
+    fn test_models_table_has_correct_columns() {
+        let storage = setup_in_memory();
+        let pool = storage.get_pool();
+        let conn = pool.get().unwrap();
+
+        let mut stmt = conn.prepare("PRAGMA table_info('models')").unwrap();
+        let columns: Vec<String> = stmt
+            .query_map([], |row| row.get::<_, String>(1))
+            .unwrap()
+            .filter_map(std::result::Result::ok)
+            .collect();
+
+        assert!(
+            columns.contains(&"id".to_string()),
+            "models should have 'id' column"
+        );
+        assert!(
+            columns.contains(&"provider_id".to_string()),
+            "models should have 'provider_id' column"
+        );
+        assert!(
+            columns.contains(&"client_name".to_string()),
+            "models should have 'client_name' column"
+        );
+        assert!(
+            columns.contains(&"price_input".to_string()),
+            "models should have 'price_input' column"
+        );
+        assert!(
+            columns.contains(&"price_output".to_string()),
+            "models should have 'price_output' column"
+        );
+        assert!(
+            columns.contains(&"currency".to_string()),
+            "models should have 'currency' column"
+        );
+        assert!(
+            columns.contains(&"context_window".to_string()),
+            "models should have 'context_window' column"
+        );
+    }
+
+    #[test]
+    fn test_models_foreign_key_to_providers() {
+        let storage = setup_in_memory();
+        let pool = storage.get_pool();
+        let conn = pool.get().unwrap();
+
+        // Verify foreign key exists
+        let mut stmt = conn.prepare("PRAGMA foreign_key_list('models')").unwrap();
+        let fk_refs: Vec<String> = stmt
+            .query_map([], |row| row.get::<_, String>(2))
+            .unwrap()
+            .filter_map(std::result::Result::ok)
+            .collect();
+
+        assert!(
+            fk_refs.contains(&"providers".to_string()),
+            "models.provider_id should reference providers(id)"
+        );
+    }
+
+    // ── Seed data tests ─────────────────────────────────────────────
+
+    #[test]
+    fn test_seed_providers_populated() {
+        let storage = setup_in_memory();
+        let pool = storage.get_pool();
+        let conn = pool.get().unwrap();
+
+        let count: i64 = conn
+            .query_row("SELECT COUNT(*) FROM providers", [], |row| row.get(0))
+            .unwrap();
+        assert!(count >= 5, "should have 5 seeded providers, got {count}");
+    }
+
+    #[test]
+    fn test_seed_models_populated() {
+        let storage = setup_in_memory();
+        let pool = storage.get_pool();
+        let conn = pool.get().unwrap();
+
+        let count: i64 = conn
+            .query_row("SELECT COUNT(*) FROM models", [], |row| row.get(0))
+            .unwrap();
+        assert!(
+            count >= 15,
+            "should have at least 15 seeded models, got {count}"
+        );
+    }
+
+    #[test]
+    fn test_seed_providers_include_deepseek() {
+        let storage = setup_in_memory();
+        let pool = storage.get_pool();
+        let conn = pool.get().unwrap();
+
+        let name: String = conn
+            .query_row(
+                "SELECT name FROM providers WHERE id = 'deepseek'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(name, "DeepSeek");
+    }
+
+    #[test]
+    fn test_seed_models_linked_to_providers() {
+        let storage = setup_in_memory();
+        let pool = storage.get_pool();
+        let conn = pool.get().unwrap();
+
+        // All models should reference a valid provider
+        let orphan_count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM models WHERE provider_id NOT IN (SELECT id FROM providers)",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            orphan_count, 0,
+            "all models must reference a valid provider"
+        );
+    }
+
+    #[test]
+    fn test_seed_models_include_deepseek_flash() {
+        let storage = setup_in_memory();
+        let pool = storage.get_pool();
+        let conn = pool.get().unwrap();
+
+        let count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM models WHERE client_name = 'deepseek-v4-flash'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(count, 1, "deepseek-v4-flash should exist in models");
+    }
+
+    #[test]
+    fn test_seed_models_include_deepseek() {
+        let storage = setup_in_memory();
+        let pool = storage.get_pool();
+        let conn = pool.get().unwrap();
+
+        let count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM models WHERE client_name IN ('deepseek-v4-pro', 'deepseek-v4-flash')",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(count, 2, "deepseek models should be seeded");
+    }
+
+    // ── Storage trait tests ─────────────────────────────────────────
+
+    #[tokio::test]
+    async fn test_storage_list_providers() {
+        let storage = setup_in_memory_async().await;
+        let providers = storage.list_providers().await.unwrap();
+        assert!(!providers.is_empty(), "should return seeded providers");
+        assert!(
+            providers.iter().any(|p| p.name == "DeepSeek"),
+            "should include DeepSeek"
+        );
+        assert!(
+            providers.iter().any(|p| p.name == "Zhipu AI"),
+            "should include Zhipu AI"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_storage_get_provider_found() {
+        let storage = setup_in_memory_async().await;
+        let provider = storage.get_provider("deepseek").await.unwrap();
+        assert!(provider.is_some(), "should find deepseek provider");
+        assert_eq!(provider.unwrap().name, "DeepSeek");
+    }
+
+    #[tokio::test]
+    async fn test_storage_get_provider_not_found() {
+        let storage = setup_in_memory_async().await;
+        let provider = storage.get_provider("nonexistent").await.unwrap();
+        assert!(
+            provider.is_none(),
+            "should return None for unknown provider"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_storage_list_models_unfiltered() {
+        let storage = setup_in_memory_async().await;
+        let models = storage.list_models(None).await.unwrap();
+        assert!(!models.is_empty(), "should return seeded models");
+    }
+
+    #[tokio::test]
+    async fn test_storage_list_models_filtered_by_provider() {
+        let storage = setup_in_memory_async().await;
+        let models = storage.list_models(Some("deepseek")).await.unwrap();
+        assert!(!models.is_empty(), "should return models for deepseek");
+        for m in &models {
+            assert_eq!(
+                m.provider_id, "deepseek",
+                "all models should belong to deepseek"
+            );
+        }
     }
 }

@@ -28,6 +28,9 @@ pub enum Pricing {
         /// Price per million thinking tokens (USD).
         #[serde(default)]
         thinking_per_mtok: Option<f64>,
+        /// Pricing currency (e.g. "USD", "CNY").
+        #[serde(default = "default_currency")]
+        currency: String,
     },
     /// Credit-based pricing (some resellers, internal platforms).
     Credits {
@@ -49,6 +52,11 @@ pub enum Pricing {
         #[serde(default)]
         output_multiplier: Option<f64>,
     },
+}
+
+/// Default currency for `Pricing::PerToken`.
+fn default_currency() -> String {
+    "USD".to_string()
 }
 
 /// Billing mode for a channel mapping.
@@ -278,10 +286,13 @@ impl ChannelState {
 
     /// Returns `true` when the channel can be tried.
     #[must_use]
-    pub fn is_tryable(&self, cooldown: Duration) -> bool {
+    pub fn is_tryable(&self, base_cooldown: Duration) -> bool {
         match self.health {
             ChannelHealth::Healthy => true,
-            ChannelHealth::Unhealthy => self.failed_at.is_none_or(|t| t.elapsed() >= cooldown),
+            ChannelHealth::Unhealthy => {
+                let effective = exponential_cooldown(self.consecutive_failures, base_cooldown);
+                self.failed_at.is_none_or(|t| t.elapsed() >= effective)
+            }
         }
     }
 }
@@ -289,6 +300,20 @@ impl ChannelState {
 impl Default for ChannelState {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+/// Computes exponential backoff cooldown based on consecutive failures.
+///
+/// - 1st failure: `base`
+/// - 2nd failure: `base * 5`
+/// - 3rd+ failure: `base * 15`
+#[must_use]
+pub fn exponential_cooldown(consecutive_failures: u32, base: Duration) -> Duration {
+    match consecutive_failures {
+        0..=1 => base,
+        2 => base * 5,
+        _ => base * 15,
     }
 }
 
@@ -334,13 +359,49 @@ mod tests {
     }
 
     #[test]
-    fn test_channel_state_cooldown_expired() {
+    fn test_exponential_cooldown_first_failure_60s() {
+        assert_eq!(
+            exponential_cooldown(1, Duration::from_secs(60)),
+            Duration::from_secs(60)
+        );
+    }
+
+    #[test]
+    fn test_exponential_cooldown_second_failure_300s() {
+        assert_eq!(
+            exponential_cooldown(2, Duration::from_secs(60)),
+            Duration::from_secs(300)
+        );
+    }
+
+    #[test]
+    fn test_exponential_cooldown_third_failure_900s() {
+        assert_eq!(
+            exponential_cooldown(3, Duration::from_secs(60)),
+            Duration::from_secs(900)
+        );
+    }
+
+    #[test]
+    fn test_channel_state_cooldown_expired_first_failure() {
+        // 1 failure → 60s cooldown, 61s elapsed → tryable
+        let state = ChannelState {
+            health: ChannelHealth::Unhealthy,
+            failed_at: Some(Instant::now() - Duration::from_secs(61)),
+            consecutive_failures: 1,
+        };
+        assert!(state.is_tryable(Duration::from_secs(60)));
+    }
+
+    #[test]
+    fn test_channel_state_cooldown_not_expired_third_failure() {
+        // 3 failures → 900s cooldown, 61s elapsed → NOT tryable
         let state = ChannelState {
             health: ChannelHealth::Unhealthy,
             failed_at: Some(Instant::now() - Duration::from_secs(61)),
             consecutive_failures: 3,
         };
-        assert!(state.is_tryable(Duration::from_secs(60)));
+        assert!(!state.is_tryable(Duration::from_secs(60)));
     }
 
     #[test]
@@ -370,6 +431,7 @@ mod tests {
                 cache_write_per_mtok: None,
                 cache_read_per_mtok: None,
                 thinking_per_mtok: None,
+                currency: "USD".to_string(),
             },
         };
         assert!(!billing.is_flat_fee());

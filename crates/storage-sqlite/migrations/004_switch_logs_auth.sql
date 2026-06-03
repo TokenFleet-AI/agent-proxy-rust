@@ -1,22 +1,9 @@
--- V4: Recreate cost_records with new schema, add switch_logs, auth_keys, providers.
+-- V4: Recreate cost_records with new schema, add switch_logs, auth_keys.
 -- cost_records moves from integer AUTOINCREMENT id to TEXT (UUID v7) pk,
 -- and columns are renamed to match the token-fleet-switch schema.
+-- Note: providers + models are now in V1 (001_init.sql).
 
 ALTER TABLE channels ADD COLUMN priority INTEGER NOT NULL DEFAULT 0;
-
-CREATE TABLE IF NOT EXISTS providers (
-    id TEXT PRIMARY KEY,
-    name TEXT NOT NULL
-);
-
-INSERT OR IGNORE INTO providers (id, name) VALUES
-    ('019a0000-0000-7000-0000-000000000001', 'Anthropic'),
-    ('019a0000-0000-7000-0000-000000000002', 'OpenAI'),
-    ('019a0000-0000-7000-0000-000000000003', 'DeepSeek'),
-    ('019a0000-0000-7000-0000-000000000004', 'DashScope'),
-    ('019a0000-0000-7000-0000-000000000005', 'Zhipu GLM'),
-    ('019a0000-0000-7000-0000-000000000006', 'Kimi'),
-    ('019a0000-0000-7000-0000-000000000007', 'MiniMax');
 
 DROP TABLE IF EXISTS cost_records_daily;
 DROP TABLE IF EXISTS cost_records;

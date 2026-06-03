@@ -55,6 +55,13 @@ pub enum ProxyError {
         retry_after: Duration,
     },
 
+    /// Circuit breaker is open — channel is unavailable.
+    #[error("circuit open for channel '{channel}'")]
+    CircuitOpen {
+        /// The channel that is currently open.
+        channel: String,
+    },
+
     /// Internal error (DB, config, unexpected).
     #[error("internal error: {0}")]
     Internal(#[from] anyhow::Error),
@@ -147,6 +154,13 @@ impl ProxyError {
                     format!("no channel available for model '{model}'"),
                 ),
             ),
+            Self::CircuitOpen { channel } => (
+                StatusCode::SERVICE_UNAVAILABLE,
+                ErrorBody::new(
+                    "circuit_open",
+                    format!("circuit breaker open for channel '{channel}'"),
+                ),
+            ),
             Self::Compression(msg) => (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 ErrorBody::new("compression_error", msg.clone()),
@@ -173,7 +187,9 @@ impl ProxyError {
                 StatusCode::TOO_MANY_REQUESTS
             }
             Self::Upstream { .. } | Self::ProtocolConversion(_) => StatusCode::BAD_GATEWAY,
-            Self::ChannelSelection { .. } => StatusCode::SERVICE_UNAVAILABLE,
+            Self::CircuitOpen { .. } | Self::ChannelSelection { .. } => {
+                StatusCode::SERVICE_UNAVAILABLE
+            }
             Self::Compression(_) | Self::Internal(_) => StatusCode::INTERNAL_SERVER_ERROR,
         }
     }
@@ -188,6 +204,7 @@ impl ProxyError {
             Self::Upstream { source, .. } if source.contains("429") => "upstream_rate_limited",
             Self::Upstream { .. } => "upstream_error",
             Self::ProtocolConversion(_) => "protocol_conversion",
+            Self::CircuitOpen { .. } => "circuit_open",
             Self::ChannelSelection { .. } => "no_channel",
             Self::Compression(_) => "compression_error",
             Self::Internal(_) => "internal_error",
@@ -302,6 +319,10 @@ mod tests {
             }
             .error_code(),
             ProxyError::ProtocolConversion("x".into()).error_code(),
+            ProxyError::CircuitOpen {
+                channel: "x".into(),
+            }
+            .error_code(),
             ProxyError::ChannelSelection { model: "x".into() }.error_code(),
             ProxyError::Compression("x".into()).error_code(),
             ProxyError::Internal(anyhow::anyhow!("x")).error_code(),

@@ -110,7 +110,7 @@ Execution order: `on_request` in registration order, `on_response` in reverse.
 
 6. CostMiddleware (runs after response):
    - Read selected channel + pricing from ctx.extensions
-   - Read StatsRecord (compression before/after) from ctx.extensions
+   - Read CompressionStats (compression before/after) from ctx.extensions
    - Calculate actual_cost + compression savings
    - Write to SQLite
 

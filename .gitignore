@@ -8,3 +8,6 @@
 .mcp.json
 ruvector.db
 .idea
+*.db
+*.db-shm
+*.db-wal

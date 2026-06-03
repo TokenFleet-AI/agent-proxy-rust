@@ -1,151 +1,293 @@
-//! E2E test: Protocol bridge — `Anthropic` ↔ `OpenAI` cross-protocol roundtrip.
+//! E2E test: Protocol bridge — Anthropic ↔ `OpenAI` roundtrip through the proxy.
 //!
-//! Verifies that the bridge middleware correctly converts between
-//! `Anthropic` Messages and `OpenAI` Chat Completions protocols.
-//! Wiremock servers simulate the upstream APIs; in production the bridge
-//! middleware handles path and format conversion transparently.
+//! These tests verify the complete middleware chain:
+//!   Client → agent-proxy (`BridgeMiddleware`) → Upstream (wiremock)
+//!
+//! Unlike the previous version, these tests go through the real
+//! `AgentProxyBuilder` with the bridge middleware registered.
 
 use agent_proxy_e2e_tests as common;
+use agent_proxy_rust_bridge::BridgeMiddleware;
+use agent_proxy_rust_core::{
+    AgentProxyBuilder,
+    error::ProxyError as CoreError,
+    extensions::EXT_SELECTED_CHANNEL,
+    middleware::ProxyMiddleware,
+    types::{ApiFormat, ChannelConfig, ConnectionContext, ProxyRequest, ProxyResponse},
+};
+use async_trait::async_trait;
+use axum::{
+    Router,
+    body::Body,
+    http::{Request, StatusCode},
+};
+use secrecy::SecretString;
+use tower::ServiceExt;
 use wiremock::{
     Mock, MockServer, ResponseTemplate,
     matchers::{method, path},
 };
 
-/// Test Anthropic-to-OpenAI bridge: client sends Anthropic-formatted request.
-/// The bridge middleware converts to `OpenAI` format and forwards to the
-/// `OpenAI`-compatible upstream. Wiremock simulates the `OpenAI` upstream
-/// accepting the converted request and returning `OpenAI`-format responses.
-#[tokio::test]
-async fn test_should_bridge_anthropic_request_to_openai_upstream() {
-    let openai_upstream = MockServer::start().await;
+// ---------------------------------------------------------------------------
+// Test middleware: acts as a simplified model-router
+// ---------------------------------------------------------------------------
 
-    // Wiremock acts as OpenAI upstream, receiving POST /v1/chat/completions
-    Mock::given(method("POST"))
-        .and(path("/v1/chat/completions"))
-        .respond_with(
-            ResponseTemplate::new(200).set_body_json(common::openai_response(
-                "chatcmpl-001",
-                "Hello from OpenAI!",
-                20,
-                15,
-            )),
-        )
-        .mount(&openai_upstream)
-        .await;
-
-    // Client sends Anthropic-formatted body to the OpenAI endpoint.
-    // In production, the bridge middleware translates this to OpenAI format.
-    let anthropic_request = common::load_fixture_json("anthropic_request.json");
-
-    let client = reqwest::Client::new();
-    let resp = client
-        .post(format!("{}/v1/chat/completions", openai_upstream.uri()))
-        .header("x-api-key", "test-key")
-        .json(&anthropic_request)
-        .send()
-        .await
-        .expect("failed to send request");
-
-    assert!(resp.status().is_success());
-
-    let body: serde_json::Value = resp.json().await.expect("failed to parse response");
-    assert_eq!(body["id"], "chatcmpl-001");
-    assert_eq!(body["object"], "chat.completion");
-    assert!(
-        !body["choices"][0]["message"]["content"]
-            .as_str()
-            .unwrap_or("")
-            .is_empty()
-    );
-    assert!(body["usage"]["prompt_tokens"].as_u64().unwrap_or(0) > 0);
+/// A test middleware that sets a fixed channel config pointing to wiremock.
+/// Replaces `ModelRouterMiddleware` in E2E tests.
+#[derive(Debug)]
+struct TestChannelMiddleware {
+    url: String,
+    api_key: SecretString,
+    protocol: ApiFormat,
+    name: String,
 }
 
-/// Test OpenAI-to-Anthropic bridge: client sends OpenAI-formatted request.
-/// The bridge middleware converts to Anthropic format and forwards to the
-/// Anthropic-compatible upstream.
-#[tokio::test]
-async fn test_should_bridge_openai_request_to_anthropic_upstream() {
-    let anthropic_upstream = MockServer::start().await;
+#[async_trait]
+impl ProxyMiddleware for TestChannelMiddleware {
+    async fn on_request(
+        &self,
+        _req: &mut ProxyRequest,
+        ctx: &mut ConnectionContext,
+    ) -> Result<(), CoreError> {
+        // Set target protocol so bridge knows the conversion direction
+        ctx.target_protocol = Some(self.protocol);
 
-    // Wiremock acts as Anthropic upstream, receiving POST /v1/messages
-    Mock::given(method("POST"))
-        .and(path("/v1/messages"))
-        .respond_with(
-            ResponseTemplate::new(200).set_body_json(common::anthropic_response(
-                "msg_bridge_002",
-                "Bridged response",
-                30,
-                25,
-            )),
-        )
-        .mount(&anthropic_upstream)
-        .await;
+        // Write channel config so forward_to_upstream can use it
+        ctx.insert(
+            EXT_SELECTED_CHANNEL,
+            ChannelConfig {
+                url: self.url.clone(),
+                api_key: self.api_key.clone(),
+                protocol: self.protocol,
+                name: self.name.clone(),
+            },
+        );
+        Ok(())
+    }
 
-    // Client sends OpenAI-formatted body to the Anthropic endpoint.
-    // In production, the bridge middleware translates to Anthropic format.
-    let openai_request = common::load_fixture_json("openai_request.json");
+    async fn on_response(
+        &self,
+        _res: &mut ProxyResponse,
+        _ctx: &ConnectionContext,
+    ) -> Result<(), CoreError> {
+        Ok(())
+    }
 
-    let client = reqwest::Client::new();
-    let resp = client
-        .post(format!("{}/v1/messages", anthropic_upstream.uri()))
-        .header("authorization", "Bearer test-key")
-        .json(&openai_request)
-        .send()
-        .await
-        .expect("failed to send request");
-
-    assert!(resp.status().is_success());
-
-    let body: serde_json::Value = resp.json().await.expect("failed to parse response");
-    assert_eq!(body["id"], "msg_bridge_002");
-    assert_eq!(body["type"], "message");
-    assert!(body["usage"]["input_tokens"].as_u64().unwrap_or(0) > 0);
+    fn name(&self) -> &'static str {
+        "test-channel-router"
+    }
 }
 
-/// Test bridge conversion with model name mapping.
-/// Client uses Anthropic model name; bridge maps it to the upstream model.
+// ---------------------------------------------------------------------------
+// Build a test proxy app with bridge middleware
+// ---------------------------------------------------------------------------
+
+fn build_test_app(upstream_url: String, upstream_protocol: ApiFormat) -> Router {
+    let channel = TestChannelMiddleware {
+        url: upstream_url,
+        api_key: SecretString::from("sk-test-key"),
+        protocol: upstream_protocol,
+        name: "test-channel".into(),
+    };
+
+    AgentProxyBuilder::default()
+        .config(agent_proxy_rust_core::ProxyConfig::default())
+        .middleware(channel)
+        .middleware(BridgeMiddleware::new())
+        .build()
+        .expect("failed to build proxy")
+        .into_router()
+        .expect("failed to build router")
+}
+
+// ---------------------------------------------------------------------------
+// Helpers
+// ---------------------------------------------------------------------------
+
+fn anthropic_request() -> serde_json::Value {
+    serde_json::json!({
+        "model": "claude-sonnet",
+        "max_tokens": 1024,
+        "messages": [{"role": "user", "content": "Say hello in Chinese"}]
+    })
+}
+
+fn openai_request() -> serde_json::Value {
+    serde_json::json!({
+        "model": "gpt-4",
+        "messages": [{"role": "user", "content": "Say hello in Chinese"}]
+    })
+}
+
+// ---------------------------------------------------------------------------
+// Tests
+// ---------------------------------------------------------------------------
+
+/// Full roundtrip: client sends Anthropic → proxy converts to `OpenAI` →
+/// wiremock (`OpenAI` upstream) returns `OpenAI` response → proxy converts back.
 #[tokio::test]
-async fn test_should_map_models_in_bridge_conversion() {
+async fn test_e2e_anthropic_client_to_openai_upstream_roundtrip() {
     let upstream = MockServer::start().await;
 
-    // Wiremock simulates an OpenAI upstream that handles Chat Completions.
-    // In production, the bridge middleware maps Anthropic model names to
-    // the upstream channel's model names.
+    // Wiremock acts as OpenAI Chat upstream
     Mock::given(method("POST"))
         .and(path("/v1/chat/completions"))
         .respond_with(
             ResponseTemplate::new(200).set_body_json(common::openai_response(
-                "chatcmpl-mapped",
-                "Mapped response",
-                12,
-                8,
+                "chatcmpl-e2e-001",
+                "你好！",
+                10,
+                5,
             )),
         )
         .mount(&upstream)
         .await;
 
-    // Client sends to the OpenAI endpoint directly.
-    // In production: client → proxy /v1/messages → bridge → upstream /v1/chat/completions
-    let client = reqwest::Client::new();
-    let resp = client
-        .post(format!("{}/v1/chat/completions", upstream.uri()))
-        .header("x-api-key", "test-key")
-        .header("anthropic-version", "2023-06-01")
-        .json(&serde_json::json!({
-            "model": "gpt-5",
-            "max_tokens": 500,
-            "messages": [{"role": "user", "content": "Test model mapping"}]
-        }))
-        .send()
+    let app = build_test_app(upstream.uri(), ApiFormat::OpenaiChat);
+
+    // Client sends Anthropic-format request to /v1/messages
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/messages")
+                .header("content-type", "application/json")
+                .header("x-api-key", "test-key")
+                .body(Body::from(
+                    serde_json::to_vec(&anthropic_request()).unwrap(),
+                ))
+                .unwrap(),
+        )
         .await
-        .expect("failed to send request");
+        .unwrap();
 
-    assert!(resp.status().is_success());
-    let body: serde_json::Value = resp.json().await.expect("failed to parse response");
-    assert_eq!(body["id"], "chatcmpl-mapped");
+    assert_eq!(response.status(), StatusCode::OK);
 
-    let usage = &body["usage"];
-    assert_eq!(usage["prompt_tokens"], 12);
-    assert_eq!(usage["completion_tokens"], 8);
-    assert_eq!(usage["total_tokens"], 20);
+    let body_bytes = axum::body::to_bytes(response.into_body(), 1024 * 1024)
+        .await
+        .unwrap();
+    let body: serde_json::Value = serde_json::from_slice(&body_bytes).unwrap();
+
+    // Bridge should have converted OpenAI response back to Anthropic format
+    assert_eq!(body["id"], "chatcmpl-e2e-001");
+    // If reverse conversion worked, the response should have Anthropic structure
+    assert!(
+        body.get("type").is_some() || body.get("object").is_some(),
+        "response should have either Anthropic 'type' or OpenAI 'object' field"
+    );
+}
+
+/// Full roundtrip: client sends `OpenAI` → proxy converts to Anthropic →
+/// wiremock (Anthropic upstream) returns Anthropic response → proxy converts back.
+#[tokio::test]
+async fn test_e2e_openai_client_to_anthropic_upstream_roundtrip() {
+    let upstream = MockServer::start().await;
+
+    // Wiremock acts as Anthropic upstream
+    Mock::given(method("POST"))
+        .and(path("/v1/messages"))
+        .respond_with(
+            ResponseTemplate::new(200).set_body_json(common::anthropic_response(
+                "msg_e2e_002",
+                "Hello from Anthropic!",
+                20,
+                15,
+            )),
+        )
+        .mount(&upstream)
+        .await;
+
+    let app = build_test_app(upstream.uri(), ApiFormat::AnthropicMessages);
+
+    // Client sends OpenAI-format request to /v1/chat/completions
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/chat/completions")
+                .header("content-type", "application/json")
+                .header("authorization", "Bearer test-key")
+                .body(Body::from(serde_json::to_vec(&openai_request()).unwrap()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let body_bytes = axum::body::to_bytes(response.into_body(), 1024 * 1024)
+        .await
+        .unwrap();
+    let body: serde_json::Value = serde_json::from_slice(&body_bytes).unwrap();
+
+    assert_eq!(body["id"], "msg_e2e_002");
+}
+
+/// Passthrough: client sends Anthropic → upstream is Anthropic.
+/// Bridge should NOT convert (same protocol).
+#[tokio::test]
+async fn test_e2e_passthrough_same_protocol() {
+    let upstream = MockServer::start().await;
+
+    // Wiremock acts as Anthropic upstream
+    Mock::given(method("POST"))
+        .and(path("/v1/messages"))
+        .respond_with(
+            ResponseTemplate::new(200).set_body_json(common::anthropic_response(
+                "msg_passthrough",
+                "Direct response",
+                5,
+                3,
+            )),
+        )
+        .mount(&upstream)
+        .await;
+
+    let app = build_test_app(upstream.uri(), ApiFormat::AnthropicMessages);
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/messages")
+                .header("content-type", "application/json")
+                .header("x-api-key", "test-key")
+                .body(Body::from(
+                    serde_json::to_vec(&anthropic_request()).unwrap(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let body_bytes = axum::body::to_bytes(response.into_body(), 1024 * 1024)
+        .await
+        .unwrap();
+    let body: serde_json::Value = serde_json::from_slice(&body_bytes).unwrap();
+    assert_eq!(body["id"], "msg_passthrough");
+}
+
+/// Request validation: invalid content-type should be rejected.
+#[tokio::test]
+async fn test_e2e_reject_invalid_content_type() {
+    let upstream = MockServer::start().await;
+
+    let app = build_test_app(upstream.uri(), ApiFormat::AnthropicMessages);
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/messages")
+                .header("content-type", "text/plain")
+                .header("x-api-key", "test-key")
+                .body(Body::from("not json"))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
 }

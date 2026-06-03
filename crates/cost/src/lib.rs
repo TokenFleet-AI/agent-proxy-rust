@@ -6,9 +6,9 @@
 //!
 //! # Usage
 //!
-//! The `CostMiddleware` is called after the `on_response` chain completes.
-//! It does not implement `ProxyMiddleware` — the server engine calls
-//! [`CostMiddleware::record`] directly after forwarding.
+//! `CostMiddleware` implements [`agent_proxy_rust_core::CostRecorder`] and is
+//! registered via [`AgentProxyBuilder::cost_recorder`]. The server engine calls
+//! `record()` after the `on_response` chain completes.
 
 #![forbid(unsafe_code)]
 #![warn(missing_docs, missing_debug_implementations)]
@@ -20,9 +20,9 @@
 use std::sync::Arc;
 
 use agent_proxy_rust_core::{
-    ProxyError,
-    extensions::{EXT_SELECTED_CHANNEL, EXT_SELECTED_MAPPING, EXT_STATS_RECORD},
-    types::{ApiFormat, ChannelConfig, ConnectionContext},
+    CompressionStats, CostRecorder, ProxyError,
+    extensions::{EXT_COMPRESSION_STATS, EXT_SELECTED_MAPPING},
+    types::{ApiFormat, ConnectionContext},
 };
 use agent_proxy_rust_model_router::{Pricing, SelectedMappingInfo};
 use agent_proxy_rust_storage::{CostFilter, CostRecord, Storage, TimeRange};
@@ -51,25 +51,24 @@ pub struct Usage {
 pub struct CostMiddleware {
     storage: Arc<dyn Storage>,
     user_name: String,
-    project_path: String,
-    agent_type: String,
+}
+
+#[async_trait::async_trait]
+impl CostRecorder for CostMiddleware {
+    async fn record(
+        &self,
+        ctx: &ConnectionContext,
+        response_body: &serde_json::Value,
+    ) -> Result<(), ProxyError> {
+        self.record(ctx, response_body).await
+    }
 }
 
 impl CostMiddleware {
     /// Creates a new [`CostMiddleware`].
     #[must_use]
-    pub fn new(
-        storage: Arc<dyn Storage>,
-        user_name: String,
-        project_path: String,
-        agent_type: String,
-    ) -> Self {
-        Self {
-            storage,
-            user_name,
-            project_path,
-            agent_type,
-        }
+    pub fn new(storage: Arc<dyn Storage>, user_name: String) -> Self {
+        Self { storage, user_name }
     }
 
     /// Records a cost entry for the completed request.
@@ -82,49 +81,72 @@ impl CostMiddleware {
         ctx: &ConnectionContext,
         response_body: &serde_json::Value,
     ) -> Result<(), ProxyError> {
-        let _channel_config = ctx.get::<ChannelConfig>(EXT_SELECTED_CHANNEL);
         let mapping_info = ctx.get::<SelectedMappingInfo>(EXT_SELECTED_MAPPING);
-        let stats = ctx.get::<serde_json::Value>(EXT_STATS_RECORD);
+        let stats = ctx.get::<CompressionStats>(EXT_COMPRESSION_STATS);
 
         let channel_id = mapping_info.map_or(String::new(), |m| m.channel_id.clone());
 
         let usage = extract_usage(response_body, ctx.target_protocol);
 
-        let (actual_cost, unit) = match mapping_info {
-            Some(m) if m.is_flat_fee => (0.0, "USD"),
-            _ => (0.0, "USD"),
+        // Compute actual cost from pricing
+        let (actual_cost, unit) = match mapping_info.and_then(|m| m.pricing.as_ref()) {
+            Some(pricing) => calc_cost(&usage, pricing),
+            None => (0.0, "USD".to_string()),
         };
 
-        let pre_compress = stats
-            .and_then(|s| s.get("input_tokens"))
-            .and_then(serde_json::Value::as_u64)
-            .unwrap_or(0);
-        let post_compress = stats
-            .and_then(|s| s.get("output_tokens"))
-            .and_then(serde_json::Value::as_u64)
-            .unwrap_or(0);
-        let compression_saved = pre_compress.saturating_sub(post_compress);
+        // Compression stats from all layers
+        let schema_saved = stats.map_or(
+            0,
+            agent_proxy_rust_core::CompressionStats::proxy_schema_saved,
+        );
+        let response_saved = stats.map_or(
+            0,
+            agent_proxy_rust_core::CompressionStats::proxy_response_saved,
+        );
+        let rtk_saved = stats.map_or(0, |s| s.rtk_saved);
+        let tokenless_saved =
+            stats.map_or(0, agent_proxy_rust_core::CompressionStats::tokenless_saved);
+        let experimental_saved = stats.map_or(0, |s| s.tokenless_experimental);
+        let pre_compress = stats.map_or(0, |s| s.tokenless_pre + s.proxy_req_pre);
+        let post_compress = stats.map_or(0, |s| s.tokenless_post + s.proxy_req_post);
+        let compression_saved =
+            tokenless_saved + experimental_saved + schema_saved + response_saved + rtk_saved;
+        let pricing_snapshot_json =
+            mapping_info.map_or(String::new(), |m| m.pricing_snapshot_json.clone());
+
+        // Total tokens consumed by upstream API
+        let after_tokens = usage.input_tokens + usage.output_tokens;
+        // Tokenless saved tokens (accumulated from hook reports)
+        let tokenless_saved = ctx.tokenless_saved_tokens;
+        // All compression layers combined
+        let total_saved = tokenless_saved + compression_saved;
 
         let record = CostRecord {
             id: uuid::Uuid::now_v7().to_string(),
             channel_id,
-            project: self.project_path.clone(),
+            project: ctx.project_path.clone().unwrap_or_default(),
             user_id: self.user_name.clone(),
-            agent_type: self.agent_type.clone(),
+            agent_type: ctx.agent_type.to_string(),
             input_tokens: usage.input_tokens as i64,
             output_tokens: usage.output_tokens as i64,
             cache_write_tokens: usage.cache_write_tokens as i64,
             cache_read_tokens: usage.cache_read_tokens as i64,
             thinking_tokens: usage.thinking_tokens as i64,
             cost: actual_cost,
-            schema_saved_tokens: 0,
-            response_saved_tokens: 0,
-            rtk_saved_tokens: 0,
+            schema_saved_tokens: schema_saved as i64,
+            response_saved_tokens: response_saved as i64,
+            rtk_saved_tokens: rtk_saved as i64,
             pre_compress_tokens: pre_compress as i64,
             post_compress_tokens: post_compress as i64,
             compression_tokens_saved: compression_saved as i64,
-            unit: unit.to_owned(),
+            unit,
             timestamp: Utc::now().to_rfc3339(),
+            pricing_snapshot_json,
+            session_id: ctx.session_id.clone(),
+            before_tokens: (after_tokens + total_saved) as i64,
+            after_tokens: after_tokens as i64,
+            tokens_saved: total_saved as i64,
+            compression_breakdown_json: ctx.tokenless_breakdown_json.clone().unwrap_or_default(),
         };
 
         self.storage
@@ -181,7 +203,7 @@ pub fn extract_usage(body: &serde_json::Value, format: Option<ApiFormat>) -> Usa
         Some(ApiFormat::AnthropicMessages) => extract_anthropic(body),
         Some(ApiFormat::OpenaiChat) => extract_openai_chat(body),
         Some(ApiFormat::OpenaiResponses) => extract_openai_responses(body),
-        None => auto_detect_usage(body),
+        None | Some(_) => auto_detect_usage(body),
     }
 }
 
@@ -375,7 +397,7 @@ fn extract_openai_responses_from_usage(usage: &serde_json::Value) -> Usage {
 ///
 /// Returns `(cost, unit)` where `unit` is `"USD"`, `"CNY"`, or `"credits"`.
 #[must_use]
-pub fn calc_cost(usage: &Usage, pricing: &Pricing) -> (f64, &'static str) {
+pub fn calc_cost(usage: &Usage, pricing: &Pricing) -> (f64, String) {
     match pricing {
         Pricing::PerToken {
             input_per_mtok,
@@ -383,6 +405,7 @@ pub fn calc_cost(usage: &Usage, pricing: &Pricing) -> (f64, &'static str) {
             cache_write_per_mtok,
             cache_read_per_mtok,
             thinking_per_mtok,
+            currency,
         } => {
             let input_cost = usage.input_tokens as f64 / 1_000_000.0 * input_per_mtok;
             let output_cost = usage.output_tokens as f64 / 1_000_000.0 * output_per_mtok;
@@ -392,9 +415,10 @@ pub fn calc_cost(usage: &Usage, pricing: &Pricing) -> (f64, &'static str) {
                 usage.cache_read_tokens as f64 / 1_000_000.0 * cache_read_per_mtok.unwrap_or(0.0);
             let thinking_cost =
                 usage.thinking_tokens as f64 / 1_000_000.0 * thinking_per_mtok.unwrap_or(0.0);
+            let unit = currency.clone();
             (
                 input_cost + output_cost + cache_write_cost + cache_read_cost + thinking_cost,
-                "USD",
+                unit,
             )
         }
         Pricing::Credits {
@@ -407,7 +431,7 @@ pub fn calc_cost(usage: &Usage, pricing: &Pricing) -> (f64, &'static str) {
             let output =
                 usage.output_tokens as f64 / 1_000_000.0 * credits_per_mtok_output.unwrap_or(0.0);
             let per_req = credits_per_request.unwrap_or(0.0);
-            (input + output + per_req, "credits")
+            (input + output + per_req, "credits".to_string())
         }
         Pricing::CharBased {
             price_per_million_chars,
@@ -418,7 +442,7 @@ pub fn calc_cost(usage: &Usage, pricing: &Pricing) -> (f64, &'static str) {
             let output_chars = usage.output_tokens as f64 * 0.75 * output_multiplier.unwrap_or(1.0);
             (
                 (input_chars + output_chars) / 1_000_000.0 * price_per_million_chars,
-                "CNY",
+                "CNY".to_string(),
             )
         }
     }
@@ -426,8 +450,8 @@ pub fn calc_cost(usage: &Usage, pricing: &Pricing) -> (f64, &'static str) {
 
 /// Calculates cost for a subscription channel (zero per-request cost).
 #[must_use]
-pub fn calc_subscription_cost() -> (f64, &'static str) {
-    (0.0, "USD")
+pub fn calc_subscription_cost() -> (f64, String) {
+    (0.0, "USD".to_string())
 }
 
 // ── Tests ───────────────────────────────────────────────────────────
@@ -565,6 +589,7 @@ data: {"type":"response.completed","response":{"usage":{"input_tokens":1200,"out
             cache_write_per_mtok: Some(3.75),
             cache_read_per_mtok: Some(0.3),
             thinking_per_mtok: None,
+            currency: "USD".to_string(),
         };
         let (cost, unit) = calc_cost(&usage, &pricing);
         assert_eq!(unit, "USD");
@@ -641,6 +666,7 @@ data: {"type":"response.completed","response":{"usage":{"input_tokens":1200,"out
                 cache_write_per_mtok: None,
                 cache_read_per_mtok: None,
                 thinking_per_mtok: None,
+                currency: "USD".to_string(),
             },
             "credits" => Pricing::Credits {
                 credits_per_mtok_input: Some(input_rate),
