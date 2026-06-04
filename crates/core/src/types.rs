@@ -206,6 +206,8 @@ pub struct ConnectionContext {
     pub session_id: Option<String>,
     /// The project path extracted from `X-Claude-Code-Project-Path` header.
     pub project_path: Option<String>,
+    /// The user name extracted from the tokenless report file (`userName` field).
+    pub user_name: Option<String>,
     /// Accumulated tokens saved by tokenless hooks (from report file).
     pub tokenless_saved_tokens: u64,
     /// Raw breakdown from tokenless reports, stored as JSON for `CostRecord`.
@@ -231,6 +233,7 @@ impl ConnectionContext {
             extensions: HashMap::new(),
             session_id: None,
             project_path: None,
+            user_name: None,
             tokenless_saved_tokens: 0,
             tokenless_breakdown_json: None,
         }
@@ -259,7 +262,7 @@ impl ConnectionContext {
 /// Set by the model-router middleware via `ctx.extensions`.
 #[derive(Debug, Clone)]
 pub struct ChannelConfig {
-    /// The upstream base URL.
+    /// The upstream base URL (from the matched protocol entry's `base_url`).
     pub url: String,
     /// The API key for the upstream channel.
     ///
@@ -270,6 +273,9 @@ pub struct ChannelConfig {
     pub protocol: ApiFormat,
     /// The channel name for cost tracking.
     pub name: String,
+    /// Optional path rewrite. When `Some`, overrides the request path entirely.
+    /// When `None`, the original (possibly bridge-rewritten) request path is used.
+    pub rewrite_path: Option<String>,
 }
 
 #[cfg(test)]

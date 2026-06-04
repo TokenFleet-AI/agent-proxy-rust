@@ -76,9 +76,8 @@ impl CompressionStats {
 /// Returns [`CompressionStats::default()`] if the env var is not set or invalid.
 #[must_use]
 pub fn read_tokenless_stats() -> CompressionStats {
-    let value = match std::env::var("TOKENLESS_TOKENS") {
-        Ok(v) => v,
-        Err(_) => return CompressionStats::default(),
+    let Ok(value) = std::env::var("TOKENLESS_TOKENS") else {
+        return CompressionStats::default();
     };
     if value.is_empty() {
         return CompressionStats::default();

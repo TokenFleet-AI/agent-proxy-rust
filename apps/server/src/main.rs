@@ -41,7 +41,6 @@ async fn main() -> Result<()> {
     let admin_key = admin_auth::resolve_admin_key();
     let admin = admin::admin_routes(storage.clone(), Some(admin_key.clone()));
 
-    #[allow(clippy::disallowed_methods)]
     eprintln!("[agent-proxy] Admin key: {admin_key}");
 
     let proxy_api_key = std::env::var("AGENT_PROXY_API_KEY")
@@ -58,10 +57,7 @@ async fn main() -> Result<()> {
         ..Default::default()
     };
 
-    let cost_middleware = Arc::new(CostMiddleware::new(
-        storage.clone(),
-        "agent-proxy".to_string(),
-    ));
+    let cost_middleware = Arc::new(CostMiddleware::new(storage.clone(), "unknown".to_string()));
 
     let proxy = AgentProxyBuilder::default()
         .config(config)
@@ -93,8 +89,9 @@ fn parse_db_path() -> PathBuf {
     if let Ok(p) = std::env::var("AGENT_PROXY_DB_PATH") {
         return PathBuf::from(p);
     }
-    // 3. Default: same dir as binary
-    let mut p = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
-    p.push("agent-proxy-rust.db");
-    p
+    // 3. Default: ~/.tokenfleet-ai/token-fleet-switch
+    dirs::home_dir()
+        .unwrap_or_else(|| PathBuf::from("."))
+        .join(".tokenfleet-ai")
+        .join("token-fleet-switch")
 }

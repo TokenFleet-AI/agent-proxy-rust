@@ -5,7 +5,7 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 PROJECT_DIR="$(dirname "$SCRIPT_DIR")"
 
 # ── Config ──────────────────────────────────────────────────────────
-PROXY_KEY="${AGENT_PROXY_API_KEY:-sk-proxy-dev-key}"
+PROXY_KEY="${AGENT_PROXY_API_KEY:-sk-1da66127fb094262b2d9f96cede6d05a}"
 ADMIN_KEY="${AGENT_PROXY_ADMIN_KEY:-admin-dev-key}"
 DB_DIR="${HOME}/.tokenfleet-ai"
 DB_PATH="${DB_DIR}/agent-proxy.db"

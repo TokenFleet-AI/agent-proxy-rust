@@ -16,7 +16,8 @@ use async_trait::async_trait;
 pub use error::StorageError;
 use secrecy::SecretString;
 pub use types::{
-    Channel, CostAggregate, CostFilter, CostGroupBy, CostRecord, Model, ModelMapping, Provider,
+    AvailableChannelInfo, AvailableModelInfo, Channel, CompressionSavingsReport, CostAggregate,
+    CostFilter, CostGroupBy, CostRecord, Model, ModelMapping, ProtocolEntry, Provider,
     SubscriptionFee, SwitchLog, TimeRange,
 };
 
@@ -60,7 +61,8 @@ pub trait Storage: Send + Sync + Debug {
     /// Update just the API key for a channel.
     async fn set_channel_api_key(&self, id: &str, key: &SecretString) -> Result<(), StorageError>;
 
-    /// Update channel fields (name, enabled, priority, quota).
+    /// Update channel fields (name, enabled, priority, quota, protocols, `force_protocol`).
+    #[allow(clippy::too_many_arguments)]
     async fn update_channel(
         &self,
         id: &str,
@@ -69,6 +71,8 @@ pub trait Storage: Send + Sync + Debug {
         priority: Option<u32>,
         monthly_quota: Option<u64>,
         quota_policy: Option<&str>,
+        protocols: Option<&str>,
+        force_protocol: Option<&str>,
     ) -> Result<Channel, StorageError>;
 
     /// Delete a channel and its model mappings (cascade).
@@ -120,6 +124,15 @@ pub trait Storage: Send + Sync + Debug {
 
     /// Record a channel switch event.
     async fn insert_switch_log(&self, log: &SwitchLog) -> Result<(), StorageError>;
+
+    /// Query recent switch logs, optionally limited.
+    async fn query_switch_logs(&self, limit: Option<u32>) -> Result<Vec<SwitchLog>, StorageError>;
+
+    // ── Available Channels ───────────────────────────────────
+
+    /// List all enabled channels with their bound models.
+    /// Used by token-fleet-switch for Claude direct-connect mode.
+    async fn list_available_channels(&self) -> Result<Vec<AvailableChannelInfo>, StorageError>;
 
     // ── Subscription Fees ───────────────────────────────────
 

@@ -27,9 +27,9 @@
 //!
 //! | Value | Meaning |
 //! |---|---|
-//! | `compress-schema` | Tool schema definition compression (BeforeModel hook) |
-//! | `compress-response` | Tool response output compression (PostToolUse hook) |
-//! | `rewrite-command` | Shell command rewriting via RTK (PreToolUse hook) |
+//! | `compress-schema` | Tool schema definition compression (`BeforeModel` hook) |
+//! | `compress-response` | Tool response output compression (`PostToolUse` hook) |
+//! | `rewrite-command` | Shell command rewriting via RTK (`PreToolUse` hook) |
 //! | `compress-toon` | TOON format encoding |
 //!
 //! ## method values (by opType)
@@ -67,7 +67,7 @@
 // operations that don't benefit from async I/O.
 #![allow(clippy::disallowed_methods, clippy::disallowed_types)]
 
-use std::{fs, path::PathBuf};
+use std::{fs, io::Write, path::PathBuf};
 
 use serde::Deserialize;
 
@@ -81,6 +81,8 @@ struct ProxyReport {
     agent_id: String,
     #[allow(dead_code)]
     project_path: Option<String>,
+    #[serde(default)]
+    user_name: Option<String>,
     op_type: String,
     #[allow(dead_code)]
     method: Option<String>,
@@ -112,6 +114,8 @@ pub(crate) struct TokenlessAccumulator {
     pub breakdown_json: String,
     /// Project path extracted from the first report line that has one.
     pub project_path: Option<String>,
+    /// User name extracted from the first report line that has one.
+    pub user_name: Option<String>,
 }
 
 /// Consume and parse the tokenless report file for a session.
@@ -174,7 +178,10 @@ fn parse_report_file(path: &PathBuf) -> Option<TokenlessAccumulator> {
         if let Ok(report) = serde_json::from_str::<ProxyReport>(trimmed) {
             acc.total_saved += report.saved_tokens;
             if acc.project_path.is_none() {
-                acc.project_path = report.project_path.clone();
+                acc.project_path.clone_from(&report.project_path);
+            }
+            if acc.user_name.is_none() {
+                acc.user_name.clone_from(&report.user_name);
             }
 
             breakdown_items.push(serde_json::json!({
@@ -201,7 +208,7 @@ fn parse_report_file(path: &PathBuf) -> Option<TokenlessAccumulator> {
     let _ = write_consume_log(
         breakdown_items.len(),
         acc.total_saved,
-        acc.project_path.clone(),
+        acc.project_path.as_deref(),
     );
 
     if !breakdown_items.is_empty() {
@@ -214,11 +221,7 @@ fn parse_report_file(path: &PathBuf) -> Option<TokenlessAccumulator> {
 /// Debug helper: write report consumption event to log file.
 ///
 /// Log file: `~/.tokenfleet-ai/agent-proxy/report-consume.log` (JSON Lines).
-fn write_consume_log(
-    lines: usize,
-    total_saved: u64,
-    project_path: Option<String>,
-) -> Result<(), ()> {
+fn write_consume_log(lines: usize, total_saved: u64, project_path: Option<&str>) -> Result<(), ()> {
     let home = dirs::home_dir().ok_or(())?;
     let log_dir = home.join(".tokenfleet-ai").join("agent-proxy");
     #[allow(clippy::disallowed_methods)]
@@ -238,7 +241,6 @@ fn write_consume_log(
         .open(&log_path)
         .map_err(|_| ())?;
 
-    use std::io::Write;
     writeln!(f, "{}", serde_json::to_string(&entry).unwrap_or_default()).map_err(|_| ())
 }
 
@@ -293,7 +295,7 @@ mod tests {
         ];
         let mut f = fs::File::create(&path).unwrap();
         for line in &lines {
-            writeln!(f, "{}", line).unwrap();
+            writeln!(f, "{line}").unwrap();
         }
 
         let result = parse_report_file(&path);

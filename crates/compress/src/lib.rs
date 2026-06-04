@@ -34,10 +34,14 @@ pub struct CompressMiddleware {
     response_stats: Mutex<Option<ResponseStats>>,
 }
 
+/// Token counts collected during response compression.
 #[derive(Debug, Clone, Copy, Default)]
-struct ResponseStats {
-    pre_tokens: u64,
-    post_tokens: u64,
+#[allow(dead_code)]
+pub struct ResponseStats {
+    /// Estimated tokens before compression.
+    pub pre_tokens: u64,
+    /// Estimated tokens after compression.
+    pub post_tokens: u64,
 }
 
 impl Default for CompressMiddleware {
@@ -86,7 +90,7 @@ impl ProxyMiddleware for CompressMiddleware {
 
         // Compress tools array if present
         let mut compressed = false;
-        let mut after_snapshot = String::new();
+        let after_snapshot;
         if let Some(tools) = body.get_mut("tools").and_then(|v| v.as_array_mut()) {
             let tools_count = tools.len();
             let before_snapshot = abbreviate_tools_for_log(tools);
@@ -214,7 +218,7 @@ fn abbreviate_tools_for_log(tools: &[serde_json::Value]) -> String {
         let prop_count = tool
             .pointer("/input_schema/properties")
             .and_then(|v| v.as_object())
-            .map_or(0, |o| o.len());
+            .map_or(0, serde_json::Map::len);
         items.push(serde_json::json!({
             "name": name,
             "desc": desc_short,
@@ -250,10 +254,10 @@ fn write_schema_debug_log(
 
     // Truncate if over 200 KB
     #[allow(clippy::disallowed_methods)]
-    if let Ok(meta) = std::fs::metadata(&log_path) {
-        if meta.len() > 200_000 {
-            let _ = std::fs::remove_file(&log_path);
-        }
+    if let Ok(meta) = std::fs::metadata(&log_path)
+        && meta.len() > 200_000
+    {
+        let _ = std::fs::remove_file(&log_path);
     }
 
     let entry = serde_json::json!({
@@ -266,7 +270,7 @@ fn write_schema_debug_log(
         "after": after_snapshot,
     });
 
-    #[allow(clippy::disallowed_methods)]
+    #[allow(clippy::disallowed_methods, clippy::disallowed_types)]
     let Ok(mut f) = std::fs::OpenOptions::new()
         .create(true)
         .append(true)

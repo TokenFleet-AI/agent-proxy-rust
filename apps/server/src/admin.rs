@@ -6,7 +6,9 @@
 use std::sync::Arc;
 
 use agent_proxy_rust_storage::{
-    Channel, CostFilter, CostRecord, Model, Provider, Storage, StorageError,
+    AvailableChannelInfo, Channel, CompressionSavingsReport, CostAggregate, CostFilter,
+    CostGroupBy, CostRecord, Model, ModelMapping, Provider, Storage, StorageError, SwitchLog,
+    TimeRange,
 };
 use axum::{
     Json, Router,
@@ -50,8 +52,21 @@ pub fn admin_routes(storage: Arc<dyn Storage>, admin_key: Option<String>) -> Rou
         .route("/admin/channels/{id}/api-key", put(set_channel_api_key))
         // Cost
         .route("/admin/cost-records", get(query_cost_records))
+        .route("/admin/cost-records/report", get(cost_report))
+        .route("/admin/cost-records/savings", get(cost_savings))
+        .route("/admin/cost-records/trend", get(cost_trend))
         // Model Mappings
         .route("/admin/model-mappings", get(list_model_mappings))
+        .route("/admin/model-mappings", post(create_model_mapping))
+        .route("/admin/model-mappings/{id}", put(update_model_mapping))
+        .route("/admin/model-mappings/{id}", delete(delete_model_mapping))
+        // Available Channels (for token-fleet-switch direct-connect mode)
+        .route(
+            "/admin/available-channels",
+            get(list_available_channels_handler),
+        )
+        // Switch Logs
+        .route("/admin/switch-logs", get(query_switch_logs_handler))
         // Health
         .route("/admin/health", get(admin_health))
         .layer(
@@ -96,6 +111,8 @@ struct UpdateChannelBody {
     priority: Option<u32>,
     monthly_quota: Option<u64>,
     quota_policy: Option<String>,
+    protocols: Option<String>,
+    force_protocol: Option<String>,
 }
 
 /// Cost records query params.
@@ -226,6 +243,8 @@ async fn update_channel(
             body.priority,
             body.monthly_quota,
             body.quota_policy.as_deref(),
+            body.protocols.as_deref(),
+            body.force_protocol.as_deref(),
         )
         .await
         .map_err(|e| match &e {
@@ -317,6 +336,209 @@ async fn list_model_mappings(
 async fn admin_health(State(state): State<AdminState>) -> ApiResult<serde_json::Value> {
     let healthy = state.storage.health_check().await.unwrap_or(false);
     Ok(Json(serde_json::json!({"healthy": healthy})))
+}
+
+// ── Model Mappings CRUD ────────────────────────────────────────────────────
+
+/// Create a new model mapping.
+async fn create_model_mapping(
+    State(state): State<AdminState>,
+    Json(body): Json<ModelMapping>,
+) -> ApiResult<ModelMapping> {
+    state.storage.upsert_mapping(&body).await?;
+    Ok(Json(body))
+}
+
+/// Update a model mapping.
+async fn update_model_mapping(
+    State(state): State<AdminState>,
+    Path(id): Path<String>,
+    Json(body): Json<serde_json::Value>,
+) -> ApiResult<serde_json::Value> {
+    // Fetch existing, update fields, upsert
+    let mappings = state
+        .storage
+        .list_all_mappings()
+        .await
+        .map_err(AppError::from)?;
+    let existing = mappings
+        .iter()
+        .find(|m| m.id == id)
+        .ok_or_else(|| AppError {
+            status: StatusCode::NOT_FOUND,
+            message: format!("mapping not found: {id}"),
+        })?;
+
+    let mut updated = existing.clone();
+    if let Some(v) = body.get("upstreamName").and_then(serde_json::Value::as_str) {
+        updated.upstream_name = v.to_string();
+    }
+    if let Some(v) = body.get("clientName").and_then(serde_json::Value::as_str) {
+        updated.client_name = v.to_string();
+    }
+    if let Some(v) = body.get("billing").and_then(serde_json::Value::as_str) {
+        updated.billing = v.to_string();
+    }
+    if let Some(v) = body.get("pricingJson").and_then(serde_json::Value::as_str) {
+        updated.pricing_json = v.to_string();
+    }
+    if let Some(v) = body.get("weight").and_then(serde_json::Value::as_u64) {
+        updated.weight = u32::try_from(v).unwrap_or(0);
+    }
+    if let Some(v) = body.get("enabled").and_then(serde_json::Value::as_bool) {
+        updated.enabled = v;
+    }
+
+    state.storage.upsert_mapping(&updated).await?;
+    Ok(Json(serde_json::json!({"status": "ok"})))
+}
+
+/// Delete a model mapping.
+async fn delete_model_mapping(
+    State(state): State<AdminState>,
+    Path(id): Path<String>,
+) -> ApiResult<serde_json::Value> {
+    state
+        .storage
+        .delete_mapping(&id)
+        .await
+        .map_err(|e| match &e {
+            StorageError::NotFound(_) => AppError {
+                status: StatusCode::NOT_FOUND,
+                message: format!("mapping not found: {id}"),
+            },
+            _ => AppError::from(e),
+        })?;
+    Ok(Json(serde_json::json!({"deleted": true})))
+}
+
+// ── Available Channels ─────────────────────────────────────────────────────
+
+/// Lists enabled channels with their bound models.
+/// Used by token-fleet-switch for Claude direct-connect mode.
+async fn list_available_channels_handler(
+    State(state): State<AdminState>,
+) -> ApiResult<Vec<AvailableChannelInfo>> {
+    let channels = state.storage.list_available_channels().await?;
+    Ok(Json(channels))
+}
+
+// ── Switch Logs ────────────────────────────────────────────────────────────
+
+/// Query params for switch log listing.
+#[derive(Debug, Deserialize)]
+struct SwitchLogsQuery {
+    limit: Option<u32>,
+}
+
+/// Queries recent channel switch logs.
+async fn query_switch_logs_handler(
+    State(state): State<AdminState>,
+    Query(query): Query<SwitchLogsQuery>,
+) -> ApiResult<Vec<SwitchLog>> {
+    let logs = state.storage.query_switch_logs(query.limit).await?;
+    Ok(Json(logs))
+}
+
+// ── Cost Aggregation ────────────────────────────────────────────────────────
+
+/// Query params for cost aggregation endpoints.
+#[derive(Debug, Deserialize)]
+struct CostReportQuery {
+    project: Option<String>,
+    #[serde(default = "default_days")]
+    days: u32,
+}
+
+fn default_days() -> u32 {
+    30
+}
+
+/// Returns an aggregated project cost report.
+async fn cost_report(
+    State(state): State<AdminState>,
+    Query(query): Query<CostReportQuery>,
+) -> ApiResult<Vec<CostAggregate>> {
+    let now = chrono::Utc::now();
+    let range = TimeRange {
+        start: (now - chrono::Duration::days(i64::from(query.days))).timestamp(),
+        end: now.timestamp(),
+    };
+
+    let group_by = if query.project.is_some() {
+        CostGroupBy::ProjectModelMonth
+    } else {
+        CostGroupBy::Project
+    };
+
+    let mut results = state.storage.aggregate_costs(group_by, range).await?;
+
+    // Filter by project if specified
+    if let Some(ref project) = query.project {
+        results.retain(|r| r.group_key.starts_with(project));
+    }
+
+    Ok(Json(results))
+}
+
+/// Returns compression savings for a project.
+async fn cost_savings(
+    State(state): State<AdminState>,
+    Query(query): Query<CostReportQuery>,
+) -> ApiResult<CompressionSavingsReport> {
+    let now = chrono::Utc::now();
+    let range = TimeRange {
+        start: (now - chrono::Duration::days(i64::from(query.days))).timestamp(),
+        end: now.timestamp(),
+    };
+
+    let filter = CostFilter {
+        project_path: query.project,
+        model_name: None,
+        channel_name: None,
+        time_range: Some(range),
+        limit: None,
+        offset: None,
+    };
+
+    let records = state.storage.query_cost_records(filter).await?;
+    let report = CompressionSavingsReport {
+        schema_saved_tokens: records.iter().map(|r| r.schema_saved_tokens).sum(),
+        response_saved_tokens: records.iter().map(|r| r.response_saved_tokens).sum(),
+        rtk_saved_tokens: records.iter().map(|r| r.rtk_saved_tokens).sum(),
+        total_saved_tokens: records.iter().map(|r| r.tokens_saved).sum(),
+    };
+
+    Ok(Json(report))
+}
+
+/// Returns hourly cost trend for a project.
+async fn cost_trend(
+    State(state): State<AdminState>,
+    Query(query): Query<CostReportQuery>,
+) -> ApiResult<Vec<CostAggregate>> {
+    let now = chrono::Utc::now();
+    let range = TimeRange {
+        start: (now - chrono::Duration::days(i64::from(query.days))).timestamp(),
+        end: now.timestamp(),
+    };
+
+    let results = state
+        .storage
+        .aggregate_costs(CostGroupBy::ProjectModelMonth, range)
+        .await?;
+
+    // Filter by project
+    let filtered: Vec<CostAggregate> = if let Some(ref project) = query.project {
+        results
+            .into_iter()
+            .filter(|r| r.group_key.starts_with(project))
+            .collect()
+    } else {
+        results
+    };
+
+    Ok(Json(filtered))
 }
 
 #[cfg(test)]

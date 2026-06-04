@@ -8,6 +8,7 @@ This directory contains reusable project documentation for the template reposito
 - [CodeGraph Usage](./codegraph-usage.md) — 通用代码图谱/关系分析教程，用于快速理解仓库结构、调用链和影响面。
 - [Data Flow](./data-flow.md) — agent-proxy-rust 完整数据流，覆盖启动、请求链、压缩、路由、桥接、计费、故障转移、安全边界。
 - [User Guide](./user-guide.md) — 用户说明书，覆盖安装、配置、通道管理、内置模型、Ruflo 集群模式、计费追踪、故障排查。
+- [Channel Redesign](./channel-redesign.md) — 渠道设计重构方案：删除 base_url、rewrite_path 语义、force_protocol 强制协议转换。
 
 ## Development workflow
 

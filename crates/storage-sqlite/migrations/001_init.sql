@@ -1,17 +1,19 @@
 -- V1: Initial schema for agent-proxy-rust storage backend.
--- Applied idempotently via PRAGMA user_version check.
+-- Consolidates all schema into a single migration (project not yet live).
 
 PRAGMA journal_mode=WAL;
 PRAGMA busy_timeout=5000;
 PRAGMA foreign_keys=ON;
 
--- ── Providers & Models (single source of truth for UI + proxy) ──
+-- ── Providers ─────────────────────────────────────────────────────────────
 
 CREATE TABLE IF NOT EXISTS providers (
     id TEXT PRIMARY KEY,
     name TEXT NOT NULL UNIQUE,
     created_at INTEGER NOT NULL
 );
+
+-- ── Models ────────────────────────────────────────────────────────────────
 
 CREATE TABLE IF NOT EXISTS models (
     id TEXT PRIMARY KEY,
@@ -26,18 +28,31 @@ CREATE TABLE IF NOT EXISTS models (
 
 CREATE INDEX IF NOT EXISTS idx_models_provider ON models(provider_id);
 
+-- ── Channels ──────────────────────────────────────────────────────────────
+
 CREATE TABLE IF NOT EXISTS channels (
     id TEXT PRIMARY KEY,
     name TEXT NOT NULL,
-    url TEXT NOT NULL,
     api_key TEXT NOT NULL,
     protocol TEXT NOT NULL,
     protocols TEXT NOT NULL DEFAULT '[]',
     is_builtin BOOLEAN DEFAULT 0,
     enabled BOOLEAN DEFAULT 1,
     created_at INTEGER NOT NULL,
-    updated_at INTEGER NOT NULL
+    updated_at INTEGER NOT NULL,
+    health_status TEXT NOT NULL DEFAULT 'Healthy',
+    cooldown_until TEXT,
+    consecutive_failures INTEGER NOT NULL DEFAULT 0,
+    billing_type TEXT NOT NULL DEFAULT 'metered',
+    monthly_quota INTEGER,
+    quota_policy TEXT NOT NULL DEFAULT 'fallback',
+    priority INTEGER NOT NULL DEFAULT 0,
+    force_protocol TEXT
 );
+
+CREATE INDEX IF NOT EXISTS idx_channels_health ON channels(enabled, health_status);
+
+-- ── Model Mappings ────────────────────────────────────────────────────────
 
 CREATE TABLE IF NOT EXISTS model_mappings (
     id TEXT PRIMARY KEY,
@@ -52,33 +67,89 @@ CREATE TABLE IF NOT EXISTS model_mappings (
 
 CREATE INDEX IF NOT EXISTS idx_mappings_channel ON model_mappings(channel_id);
 
+-- ── Cost Records ──────────────────────────────────────────────────────────
+
 CREATE TABLE IF NOT EXISTS cost_records (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    timestamp INTEGER NOT NULL,
-    user_name TEXT NOT NULL DEFAULT '',
-    project_path TEXT NOT NULL,
-    project_name TEXT NOT NULL DEFAULT '',
-    agent_type TEXT NOT NULL,
-    agent_role TEXT,
-    channel_name TEXT NOT NULL,
-    channel_kind TEXT NOT NULL,
-    model_name TEXT NOT NULL,
+    id TEXT PRIMARY KEY,
+    channel_id TEXT NOT NULL DEFAULT '',
+    project TEXT NOT NULL DEFAULT '',
+    user_id TEXT NOT NULL DEFAULT '',
+    agent_type TEXT NOT NULL DEFAULT '',
     input_tokens INTEGER NOT NULL DEFAULT 0,
     output_tokens INTEGER NOT NULL DEFAULT 0,
     cache_write_tokens INTEGER NOT NULL DEFAULT 0,
     cache_read_tokens INTEGER NOT NULL DEFAULT 0,
     thinking_tokens INTEGER NOT NULL DEFAULT 0,
-    actual_cost REAL NOT NULL DEFAULT 0.0,
-    unit TEXT NOT NULL DEFAULT 'USD',
+    cost REAL NOT NULL DEFAULT 0.0,
+    schema_saved_tokens INTEGER NOT NULL DEFAULT 0,
+    response_saved_tokens INTEGER NOT NULL DEFAULT 0,
+    rtk_saved_tokens INTEGER NOT NULL DEFAULT 0,
     pre_compress_tokens INTEGER NOT NULL DEFAULT 0,
     post_compress_tokens INTEGER NOT NULL DEFAULT 0,
-    compression_tokens_saved INTEGER NOT NULL DEFAULT 0
+    compression_tokens_saved INTEGER NOT NULL DEFAULT 0,
+    unit TEXT NOT NULL DEFAULT 'USD',
+    pricing_snapshot_json TEXT NOT NULL DEFAULT '',
+    timestamp TEXT NOT NULL,
+    session_id TEXT,
+    before_tokens INTEGER NOT NULL DEFAULT 0,
+    after_tokens INTEGER NOT NULL DEFAULT 0,
+    tokens_saved INTEGER NOT NULL DEFAULT 0,
+    compression_breakdown_json TEXT NOT NULL DEFAULT '[]'
 );
 
-CREATE INDEX IF NOT EXISTS idx_cost_project_date ON cost_records(project_path, timestamp);
-CREATE INDEX IF NOT EXISTS idx_cost_user_date ON cost_records(user_name, timestamp);
-CREATE INDEX IF NOT EXISTS idx_cost_model_date ON cost_records(model_name, timestamp);
-CREATE INDEX IF NOT EXISTS idx_cost_role_date ON cost_records(agent_role, timestamp);
+CREATE INDEX IF NOT EXISTS idx_cost_records_channel ON cost_records(channel_id);
+CREATE INDEX IF NOT EXISTS idx_cost_records_project ON cost_records(project);
+CREATE INDEX IF NOT EXISTS idx_cost_records_user ON cost_records(user_id);
+CREATE INDEX IF NOT EXISTS idx_cost_records_time ON cost_records(timestamp);
+CREATE INDEX IF NOT EXISTS idx_cost_session ON cost_records(session_id);
+
+-- ── Cost Records Daily ────────────────────────────────────────────────────
+
+CREATE TABLE IF NOT EXISTS cost_records_daily (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    date TEXT NOT NULL,
+    channel_id TEXT NOT NULL,
+    project TEXT NOT NULL,
+    agent_type TEXT NOT NULL,
+    total_input_tokens INTEGER NOT NULL,
+    total_output_tokens INTEGER NOT NULL,
+    total_cache_write_tokens INTEGER NOT NULL,
+    total_cache_read_tokens INTEGER NOT NULL,
+    total_thinking_tokens INTEGER NOT NULL,
+    total_cost REAL NOT NULL,
+    total_compression_tokens_saved INTEGER NOT NULL,
+    request_count INTEGER NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_cost_daily_date ON cost_records_daily(date);
+
+-- ── Switch Logs ───────────────────────────────────────────────────────────
+
+CREATE TABLE IF NOT EXISTS switch_logs (
+    id TEXT PRIMARY KEY,
+    from_channel_id TEXT NOT NULL,
+    to_channel_id TEXT NOT NULL,
+    reason TEXT NOT NULL,
+    cost_record_id TEXT,
+    created_at TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_switch_logs_time ON switch_logs(created_at);
+
+-- ── Auth Keys ─────────────────────────────────────────────────────────────
+
+CREATE TABLE IF NOT EXISTS auth_keys (
+    key_hash TEXT PRIMARY KEY,
+    role TEXT NOT NULL,
+    agent_type TEXT NOT NULL,
+    created_at INTEGER NOT NULL,
+    last_used_at INTEGER,
+    revoked INTEGER DEFAULT 0
+);
+
+CREATE INDEX IF NOT EXISTS idx_auth_keys_role ON auth_keys(role);
+
+-- ── Subscription Fees ─────────────────────────────────────────────────────
 
 CREATE TABLE IF NOT EXISTS subscription_fees (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -90,24 +161,9 @@ CREATE TABLE IF NOT EXISTS subscription_fees (
 
 CREATE INDEX IF NOT EXISTS idx_sub_fees_channel_month ON subscription_fees(channel_name, month);
 
-CREATE TABLE IF NOT EXISTS cost_records_daily (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    date TEXT NOT NULL,
-    project_path TEXT NOT NULL,
-    project_name TEXT NOT NULL,
-    channel_name TEXT NOT NULL,
-    model_name TEXT NOT NULL,
-    total_input_tokens INTEGER NOT NULL,
-    total_output_tokens INTEGER NOT NULL,
-    total_cache_write_tokens INTEGER NOT NULL,
-    total_cache_read_tokens INTEGER NOT NULL,
-    total_thinking_tokens INTEGER NOT NULL,
-    total_actual_cost REAL NOT NULL,
-    total_compression_tokens_saved INTEGER NOT NULL,
-    request_count INTEGER NOT NULL
-);
-
-CREATE INDEX IF NOT EXISTS idx_cost_daily_date ON cost_records_daily(date);
+-- ══════════════════════════════════════════════════════════════════════════
+-- Seed Data
+-- ══════════════════════════════════════════════════════════════════════════
 
 -- ── Seed providers ──
 INSERT OR IGNORE INTO providers (id, name, created_at) VALUES
@@ -117,7 +173,7 @@ INSERT OR IGNORE INTO providers (id, name, created_at) VALUES
     ('zhipu', 'Zhipu AI', strftime('%s', 'now')),
     ('minimax', 'MiniMax', strftime('%s', 'now'));
 
--- ── Seed models (only models with channel mappings) ──
+-- ── Seed models ──
 INSERT OR IGNORE INTO models (id, provider_id, client_name, price_input, price_output, currency, context_window, created_at) VALUES
     -- DeepSeek
     ('deepseek:deepseek-v4-flash', 'deepseek', 'deepseek-v4-flash', 1.0, 2.0, 'CNY', 1000000, strftime('%s', 'now')),
@@ -140,40 +196,39 @@ INSERT OR IGNORE INTO models (id, provider_id, client_name, price_input, price_o
     -- MiniMax
     ('minimax:minimax-m2.7', 'minimax', 'minimax-m2.7', 2.10, 8.40, 'CNY', 256000, strftime('%s', 'now'));
 
--- Seed default builtin channels (multi-protocol: one channel per provider).
-INSERT OR IGNORE INTO channels (id, name, url, api_key, protocol, protocols, is_builtin, enabled, created_at, updated_at)
+-- ── Seed channels (base_url now inside protocols JSON) ──
+INSERT OR IGNORE INTO channels (id, name, api_key, protocol, protocols, is_builtin, enabled, created_at, updated_at)
 VALUES
     -- DeepSeek (OpenAI + Anthropic)
-    ('deepseek', 'DeepSeek Official', 'https://api.deepseek.com', '', 'anthropic_messages',
-     '[{"protocol":"openai_chat","path":"/v1/chat/completions"},{"protocol":"anthropic_messages","path":"/anthropic"}]',
+    ('deepseek', 'DeepSeek Official', '', 'anthropic_messages',
+     '[{"protocol":"openai_chat","baseUrl":"https://api.deepseek.com","rewritePath":"/chat/completions"},{"protocol":"anthropic_messages","baseUrl":"https://api.deepseek.com/anthropic","rewritePath":""}]',
      1, 1, strftime('%s', 'now'), strftime('%s', 'now')),
     -- DashScope Token Plan
-    ('dashscope-token', 'DashScope Token Plan', 'https://token-plan.cn-beijing.maas.aliyuncs.com', '', 'openai_chat',
-     '[{"protocol":"openai_chat","path":"/compatible-mode/v1"},{"protocol":"anthropic_messages","path":"/apps/anthropic"}]',
+    ('dashscope-token', 'DashScope Token Plan', '', 'openai_chat',
+     '[{"protocol":"openai_chat","baseUrl":"https://token-plan.cn-beijing.maas.aliyuncs.com","rewritePath":"/compatible-mode/v1"},{"protocol":"anthropic_messages","baseUrl":"https://token-plan.cn-beijing.maas.aliyuncs.com","rewritePath":"/apps/anthropic"}]',
      1, 1, strftime('%s', 'now'), strftime('%s', 'now')),
     -- DashScope Coding Plan
-    ('dashscope-coding', 'DashScope Coding Plan', 'https://coding.dashscope.aliyuncs.com', '', 'openai_chat',
-     '[{"protocol":"openai_chat","path":"/v1"},{"protocol":"anthropic_messages","path":"/apps/anthropic"}]',
+    ('dashscope-coding', 'DashScope Coding Plan', '', 'openai_chat',
+     '[{"protocol":"openai_chat","baseUrl":"https://coding.dashscope.aliyuncs.com","rewritePath":"/v1"},{"protocol":"anthropic_messages","baseUrl":"https://coding.dashscope.aliyuncs.com","rewritePath":"/apps/anthropic"}]',
      1, 1, strftime('%s', 'now'), strftime('%s', 'now')),
     -- DashScope Pay-as-you-go
-    ('dashscope-payg', 'DashScope Pay-as-you-go', 'https://dashscope.aliyuncs.com', '', 'openai_chat',
-     '[{"protocol":"openai_chat","path":"/compatible-mode/v1"},{"protocol":"anthropic_messages","path":"/apps/anthropic"}]',
+    ('dashscope-payg', 'DashScope Pay-as-you-go', '', 'openai_chat',
+     '[{"protocol":"openai_chat","baseUrl":"https://dashscope.aliyuncs.com","rewritePath":"/compatible-mode/v1"},{"protocol":"anthropic_messages","baseUrl":"https://dashscope.aliyuncs.com","rewritePath":"/apps/anthropic"}]',
      1, 1, strftime('%s', 'now'), strftime('%s', 'now')),
     -- GLM
-    ('glm-official', 'Zhipu GLM Official', 'https://open.bigmodel.cn', '', 'openai_chat',
-     '[{"protocol":"openai_chat","path":"/api/paas/v4"}]',
+    ('glm-official', 'Zhipu GLM Official', '', 'openai_chat',
+     '[{"protocol":"openai_chat","baseUrl":"https://open.bigmodel.cn","rewritePath":"/api/paas/v4"}]',
      1, 1, strftime('%s', 'now'), strftime('%s', 'now')),
     -- Kimi
-    ('kimi-official', 'Kimi Official', 'https://api.moonshot.cn', '', 'openai_chat',
-     '[{"protocol":"openai_chat","path":"/v1"}]',
+    ('kimi-official', 'Kimi Official', '', 'openai_chat',
+     '[{"protocol":"openai_chat","baseUrl":"https://api.moonshot.cn","rewritePath":"/v1"}]',
      1, 1, strftime('%s', 'now'), strftime('%s', 'now')),
     -- MiniMax
-    ('minimax-official', 'MiniMax Official', 'https://api.minimax.chat', '', 'openai_chat',
-     '[{"protocol":"openai_chat","path":"/v1"}]',
+    ('minimax-official', 'MiniMax Official', '', 'openai_chat',
+     '[{"protocol":"openai_chat","baseUrl":"https://api.minimax.chat","rewritePath":"/v1"}]',
      1, 1, strftime('%s', 'now'), strftime('%s', 'now'));
 
--- Seed model mappings (matching token-fleet-switch channel_models design).
--- Only 26 precise bindings — each model is only on channels it actually supports.
+-- ── Seed model mappings ──
 INSERT OR IGNORE INTO model_mappings (id, channel_id, client_name, upstream_name, billing, pricing_json, weight, enabled)
 VALUES
     -- DeepSeek
@@ -185,7 +240,7 @@ VALUES
     ('dashscope-token:glm-5', 'dashscope-token', 'glm-5', 'glm-5', 'metered', '{"type":"per_token","currency":"CNY","input_per_mtok":4.0,"output_per_mtok":18.0,"cache_read_per_mtok":1.0}', 100, 1),
     ('dashscope-token:kimi-k2.5', 'dashscope-token', 'kimi-k2.5', 'kimi-k2.5', 'metered', '{"type":"per_token","currency":"CNY","input_per_mtok":4.0,"output_per_mtok":21.0,"cache_read_per_mtok":0.70}', 100, 1),
     ('dashscope-token:minimax-m2.7', 'dashscope-token', 'minimax-m2.7', 'minimax-m2.7', 'metered', '{"type":"per_token","currency":"CNY","input_per_mtok":2.10,"output_per_mtok":8.40,"cache_write_per_mtok":2.625,"cache_read_per_mtok":0.42}', 100, 1),
-    -- DashScope Coding Plan (metered)
+    -- DashScope Coding Plan
     ('dashscope-coding:qwen3.6-plus', 'dashscope-coding', 'qwen3.6-plus', 'qwen3.6-plus', 'metered', '{"type":"per_token","currency":"CNY","input_per_mtok":2.0,"output_per_mtok":12.0,"cache_write_per_mtok":2.50,"cache_read_per_mtok":0.20}', 100, 1),
     ('dashscope-coding:qwen3.5-plus', 'dashscope-coding', 'qwen3.5-plus', 'qwen3.5-plus', 'metered', '{"type":"per_token","currency":"CNY","input_per_mtok":0.80,"output_per_mtok":4.80,"cache_write_per_mtok":1.0,"cache_read_per_mtok":0.08}', 100, 1),
     ('dashscope-coding:glm-5', 'dashscope-coding', 'glm-5', 'glm-5', 'metered', '{"type":"per_token","currency":"CNY","input_per_mtok":4.0,"output_per_mtok":18.0,"cache_read_per_mtok":1.0}', 100, 1),

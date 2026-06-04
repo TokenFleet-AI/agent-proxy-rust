@@ -109,7 +109,11 @@ async fn test_get_channel_fields() {
         .expect("get_channel failed")
         .unwrap();
     assert_eq!(channel.name, "DeepSeek Official");
-    assert_eq!(channel.base_url, "https://api.deepseek.com");
+    // base_url is now inside protocols JSON
+    assert!(
+        channel.protocols.contains("api.deepseek.com"),
+        "protocols should contain deepseek base_url"
+    );
     assert_eq!(channel.billing_type, "metered");
     assert_eq!(channel.health_status, "Healthy");
     assert!(channel.enabled);
@@ -141,6 +145,8 @@ async fn test_update_channel() {
             Some(99),
             Some(500_000),
             Some("Block"),
+            None,
+            None,
         )
         .await
         .expect("update_channel failed");

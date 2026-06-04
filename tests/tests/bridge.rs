@@ -60,6 +60,7 @@ impl ProxyMiddleware for TestChannelMiddleware {
                 api_key: self.api_key.clone(),
                 protocol: self.protocol,
                 name: self.name.clone(),
+                rewrite_path: None,
             },
         );
         Ok(())

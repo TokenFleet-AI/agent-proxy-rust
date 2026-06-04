@@ -72,6 +72,7 @@ pub fn test_channel_config(base_url: impl Into<String>) -> ChannelConfig {
         api_key: secrecy::SecretString::from("sk-test-channel-key"),
         protocol: ApiFormat::AnthropicMessages,
         name: "test-channel".into(),
+        rewrite_path: None,
     }
 }
 
@@ -83,5 +84,6 @@ pub fn test_channel_config_openai(base_url: impl Into<String>) -> ChannelConfig 
         api_key: secrecy::SecretString::from("sk-test-openai-key"),
         protocol: ApiFormat::OpenaiChat,
         name: "test-openai-channel".into(),
+        rewrite_path: None,
     }
 }

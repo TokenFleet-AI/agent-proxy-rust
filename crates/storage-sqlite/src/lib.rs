@@ -9,8 +9,9 @@
 use std::fmt::Write;
 
 use agent_proxy_rust_storage::{
-    Channel, CostAggregate, CostFilter, CostGroupBy, CostRecord, Model, ModelMapping, Provider,
-    Storage, StorageError, SubscriptionFee, SwitchLog, TimeRange,
+    AvailableChannelInfo, AvailableModelInfo, Channel, CostAggregate, CostFilter, CostGroupBy,
+    CostRecord, Model, ModelMapping, Provider, Storage, StorageError, SubscriptionFee, SwitchLog,
+    TimeRange,
 };
 use async_trait::async_trait;
 use r2d2::Pool;
@@ -20,11 +21,6 @@ use secrecy::{ExposeSecret, SecretString};
 use tracing::debug;
 
 const MIGRATION_V1: &str = include_str!("../migrations/001_init.sql");
-const MIGRATION_V2: &str = include_str!("../migrations/002_health_fields.sql");
-const MIGRATION_V3: &str = include_str!("../migrations/003_savings_fields.sql");
-const MIGRATION_V4: &str = include_str!("../migrations/004_switch_logs_auth.sql");
-const MIGRATION_V5: &str = include_str!("../migrations/005_pricing_snapshot.sql");
-const MIGRATION_V6: &str = include_str!("../migrations/006_billing_correlation.sql");
 
 /// SQLite-backed storage implementation.
 ///
@@ -84,28 +80,28 @@ impl SqliteStorage {
         Ok(Channel {
             id: row.get(0)?,
             name: row.get(1)?,
-            base_url: row.get(2)?,
-            api_key: SecretString::new(row.get::<_, String>(3)?.into_boxed_str()),
-            protocol: row.get(4)?,
-            protocols: row.get::<_, String>(5).unwrap_or_default(),
-            is_builtin: row.get(6)?,
-            enabled: row.get(7)?,
-            created_at: row.get(8)?,
-            updated_at: row.get(9)?,
-            health_status: row.get(10)?,
-            cooldown_until: row.get(11)?,
-            consecutive_failures: row.get(12)?,
-            billing_type: row.get(13)?,
-            monthly_quota: row.get(14)?,
-            quota_policy: row.get(15)?,
-            priority: row.get(16)?,
+            api_key: SecretString::new(row.get::<_, String>(2)?.into_boxed_str()),
+            protocol: row.get(3)?,
+            protocols: row.get::<_, String>(4).unwrap_or_default(),
+            is_builtin: row.get(5)?,
+            enabled: row.get(6)?,
+            created_at: row.get(7)?,
+            updated_at: row.get(8)?,
+            health_status: row.get(9)?,
+            cooldown_until: row.get(10)?,
+            consecutive_failures: row.get(11)?,
+            billing_type: row.get(12)?,
+            monthly_quota: row.get(13)?,
+            quota_policy: row.get(14)?,
+            priority: row.get(15)?,
+            force_protocol: row.get(16)?,
         })
     }
 
-    const CHANNEL_COLS: &'static str = "id, name, url, api_key, protocol, protocols, is_builtin, \
+    const CHANNEL_COLS: &'static str = "id, name, api_key, protocol, protocols, is_builtin, \
                                         enabled, created_at, updated_at, health_status, \
                                         cooldown_until, consecutive_failures, billing_type, \
-                                        monthly_quota, quota_policy, priority";
+                                        monthly_quota, quota_policy, priority, force_protocol";
 }
 
 #[async_trait]
@@ -364,7 +360,6 @@ impl Storage for SqliteStorage {
     async fn upsert_channel(&self, channel: &Channel) -> Result<(), StorageError> {
         let id = channel.id.clone();
         let name = channel.name.clone();
-        let url = channel.base_url.clone();
         let api_key = channel.api_key.expose_secret().to_string();
         let protocol = channel.protocol.clone();
         let protocols = channel.protocols.clone();
@@ -376,6 +371,7 @@ impl Storage for SqliteStorage {
         let monthly_quota = channel.monthly_quota;
         let quota_policy = channel.quota_policy.clone();
         let priority = channel.priority;
+        let force_protocol = channel.force_protocol.clone();
         let pool = self.get_pool();
 
         tokio::task::spawn_blocking(move || {
@@ -383,13 +379,12 @@ impl Storage for SqliteStorage {
                 .get()
                 .map_err(|e| StorageError::Connection(e.to_string()))?;
             conn.execute(
-                "INSERT INTO channels (id, name, url, api_key, protocol, protocols, is_builtin, \
+                "INSERT INTO channels (id, name, api_key, protocol, protocols, is_builtin, \
                  enabled, created_at, updated_at, health_status, billing_type, \
-                 monthly_quota, quota_policy, priority)
+                 monthly_quota, quota_policy, priority, force_protocol)
                  VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)
                  ON CONFLICT(id) DO UPDATE SET
                    name = excluded.name,
-                   url = excluded.url,
                    api_key = excluded.api_key,
                    protocol = excluded.protocol,
                    protocols = excluded.protocols,
@@ -400,11 +395,11 @@ impl Storage for SqliteStorage {
                    billing_type = excluded.billing_type,
                    monthly_quota = excluded.monthly_quota,
                    quota_policy = excluded.quota_policy,
-                   priority = excluded.priority",
+                   priority = excluded.priority,
+                   force_protocol = excluded.force_protocol",
                 params![
                     id,
                     name,
-                    url,
                     api_key,
                     protocol,
                     protocols,
@@ -417,6 +412,7 @@ impl Storage for SqliteStorage {
                     monthly_quota,
                     quota_policy,
                     priority,
+                    force_protocol,
                 ],
             )
             .map_err(|e| StorageError::Backend(e.to_string()))?;
@@ -475,6 +471,7 @@ impl Storage for SqliteStorage {
         .map_err(|e| StorageError::Backend(format!("join error: {e}")))?
     }
 
+    #[allow(clippy::too_many_arguments)]
     async fn update_channel(
         &self,
         id: &str,
@@ -483,10 +480,14 @@ impl Storage for SqliteStorage {
         priority: Option<u32>,
         monthly_quota: Option<u64>,
         quota_policy: Option<&str>,
+        protocols: Option<&str>,
+        force_protocol: Option<&str>,
     ) -> Result<Channel, StorageError> {
         let id = id.to_string();
         let name = name.map(String::from);
         let quota_policy = quota_policy.map(String::from);
+        let protocols = protocols.map(String::from);
+        let force_protocol = force_protocol.map(String::from);
         let now = Self::now_unix();
         let pool = self.get_pool();
 
@@ -518,6 +519,14 @@ impl Storage for SqliteStorage {
             if let Some(ref qp) = quota_policy {
                 sets.push(format!("quota_policy = ?{}", param_values.len() + 1));
                 param_values.push(Box::new(qp.clone()));
+            }
+            if let Some(ref p) = protocols {
+                sets.push(format!("protocols = ?{}", param_values.len() + 1));
+                param_values.push(Box::new(p.clone()));
+            }
+            if let Some(ref fp) = force_protocol {
+                sets.push(format!("force_protocol = ?{}", param_values.len() + 1));
+                param_values.push(Box::new(fp.clone()));
             }
 
             let id_param_idx = param_values.len() + 1;
@@ -1219,6 +1228,120 @@ impl Storage for SqliteStorage {
         .map_err(|e| StorageError::Backend(format!("join error: {e}")))?
     }
 
+    // ── Switch Log Queries ───────────────────────────────────────────────
+
+    async fn query_switch_logs(&self, limit: Option<u32>) -> Result<Vec<SwitchLog>, StorageError> {
+        let limit = limit.unwrap_or(20).min(100);
+        let pool = self.get_pool();
+
+        tokio::task::spawn_blocking(move || {
+            let conn = pool
+                .get()
+                .map_err(|e| StorageError::Connection(e.to_string()))?;
+            let mut stmt = conn
+                .prepare(
+                    "SELECT id, from_channel_id, to_channel_id, reason, cost_record_id, created_at
+                     FROM switch_logs ORDER BY created_at DESC LIMIT ?1",
+                )
+                .map_err(|e| StorageError::Backend(e.to_string()))?;
+            let rows = stmt
+                .query_map(params![limit], |row| {
+                    Ok(SwitchLog {
+                        id: row.get(0)?,
+                        from_channel_id: row.get(1)?,
+                        to_channel_id: row.get(2)?,
+                        reason: row.get(3)?,
+                        cost_record_id: row.get(4)?,
+                        created_at: row.get(5)?,
+                    })
+                })
+                .map_err(|e| StorageError::Backend(e.to_string()))?;
+            let mut logs = Vec::new();
+            for row in rows {
+                logs.push(row.map_err(|e| StorageError::Backend(e.to_string()))?);
+            }
+            Ok(logs)
+        })
+        .await
+        .map_err(|e| StorageError::Backend(format!("join error: {e}")))?
+    }
+
+    // ── Available Channels ────────────────────────────────────────────
+
+    async fn list_available_channels(&self) -> Result<Vec<AvailableChannelInfo>, StorageError> {
+        let pool = self.get_pool();
+
+        tokio::task::spawn_blocking(move || {
+            let conn = pool
+                .get()
+                .map_err(|e| StorageError::Connection(e.to_string()))?;
+
+            // Get all enabled channels
+            let mut ch_stmt = conn
+                .prepare(
+                    "SELECT id, name, protocol, protocols, health_status
+                     FROM channels WHERE enabled = 1 ORDER BY priority, id",
+                )
+                .map_err(|e| StorageError::Backend(e.to_string()))?;
+
+            let channels: Vec<(String, String, String, String, String)> = ch_stmt
+                .query_map([], |row| {
+                    Ok((
+                        row.get(0)?,
+                        row.get(1)?,
+                        row.get(2)?,
+                        row.get::<_, String>(3).unwrap_or_default(),
+                        row.get::<_, String>(4).unwrap_or_default(),
+                    ))
+                })
+                .map_err(|e| StorageError::Backend(e.to_string()))?
+                .flatten()
+                .collect();
+
+            let mut result = Vec::new();
+            for (ch_id, ch_name, protocol, protocols, health) in channels {
+                // Get bound models for each channel
+                let mut m_stmt = conn
+                    .prepare(
+                        "SELECT id, client_name, upstream_name
+                         FROM model_mappings WHERE channel_id = ?1 AND enabled = 1
+                         ORDER BY client_name",
+                    )
+                    .map_err(|e| StorageError::Backend(e.to_string()))?;
+
+                let models: Vec<AvailableModelInfo> = m_stmt
+                    .query_map(params![ch_id], |row| {
+                        Ok(AvailableModelInfo {
+                            mapping_id: row.get(0)?,
+                            client_name: row.get(1)?,
+                            upstream_name: row.get(2)?,
+                        })
+                    })
+                    .map_err(|e| StorageError::Backend(e.to_string()))?
+                    .flatten()
+                    .collect();
+
+                // Skip channels with no models
+                if models.is_empty() {
+                    continue;
+                }
+
+                result.push(AvailableChannelInfo {
+                    channel_id: ch_id,
+                    channel_name: ch_name,
+                    protocol,
+                    protocols,
+                    health_status: health,
+                    enabled: true,
+                    models,
+                });
+            }
+            Ok(result)
+        })
+        .await
+        .map_err(|e| StorageError::Backend(format!("join error: {e}")))?
+    }
+
     // ── Lifecycle ──────────────────────────────────────────────────────
 
     async fn migrate(&self) -> Result<(), StorageError> {
@@ -1229,7 +1352,6 @@ impl Storage for SqliteStorage {
                 .get()
                 .map_err(|e| StorageError::Connection(e.to_string()))?;
 
-            // Check current version
             let version: i64 = conn
                 .pragma_query_value(None, "user_version", |row| row.get(0))
                 .unwrap_or(0);
@@ -1238,27 +1360,8 @@ impl Storage for SqliteStorage {
                 conn.execute_batch(MIGRATION_V1)
                     .map_err(|e| StorageError::Migration(e.to_string()))?;
             }
-            if version < 2 {
-                conn.execute_batch(MIGRATION_V2)
-                    .map_err(|e| StorageError::Migration(e.to_string()))?;
-            }
-            if version < 3 {
-                conn.execute_batch(MIGRATION_V3)
-                    .map_err(|e| StorageError::Migration(e.to_string()))?;
-            }
-            if version < 4 {
-                conn.execute_batch(MIGRATION_V4)
-                    .map_err(|e| StorageError::Migration(e.to_string()))?;
-            }
-            if version < 5 {
-                conn.execute_batch(MIGRATION_V5)
-                    .map_err(|e| StorageError::Migration(e.to_string()))?;
-            }
-            if version < 6 {
-                conn.execute_batch(MIGRATION_V6)
-                    .map_err(|e| StorageError::Migration(e.to_string()))?;
-            }
-            conn.pragma_update(None, "user_version", 6)
+
+            conn.pragma_update(None, "user_version", 1)
                 .map_err(|e| StorageError::Migration(e.to_string()))?;
 
             Ok(())

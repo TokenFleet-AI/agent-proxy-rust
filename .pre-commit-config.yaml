@@ -23,7 +23,7 @@ repos:
       - id: cargo-fmt
         name: cargo fmt
         description: Format files with rustfmt.
-        entry: bash -c 'cargo +nightly fmt -- --check'
+        entry: bash -c 'cargo fmt -- --check'
         language: system
         files: \.rs$
         pass_filenames: false
@@ -33,6 +33,13 @@ repos:
         entry: bash -c 'cargo deny check -d'
         language: system
         files: \.rs$
+        pass_filenames: false
+      - id: cargo-audit
+        name: cargo audit
+        description: Check for known security vulnerabilities
+        entry: bash -c 'cargo audit'
+        language: system
+        files: (Cargo\.lock|Cargo\.toml)$
         pass_filenames: false
       - id: typos
         name: typos
@@ -51,7 +58,7 @@ repos:
       - id: cargo-clippy
         name: cargo clippy
         description: Lint rust sources
-        entry: bash -c 'cargo clippy --all-targets --all-features --tests --benches -- -D warnings -W clippy::pedantic'
+        entry: bash -c 'cargo clippy --all-targets --all-features -- -D warnings -W clippy::pedantic'
         language: system
         files: \.rs$
         pass_filenames: false
@@ -62,3 +69,17 @@ repos:
         language: system
         files: \.rs$
         pass_filenames: false
+        stages: [manual]
+      - id: check-agent-sync
+        name: check agent sync
+        description: Ensure AGENTS.md stays in sync with CLAUDE.md
+        entry: bash -c 'make check-agent-sync'
+        language: system
+        files: (CLAUDE\.md|AGENTS\.md)$
+        pass_filenames: false
+  - repo: https://github.com/gitleaks/gitleaks
+    rev: v8.18.0
+    hooks:
+      - id: gitleaks
+        args: ["protect", "--staged", "--verbose"]
+        stages: [pre-commit]

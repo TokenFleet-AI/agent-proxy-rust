@@ -47,8 +47,6 @@ pub struct Channel {
     pub id: String,
     /// Human-readable name (e.g. "Anthropic Official").
     pub name: String,
-    /// Base URL of the upstream API.
-    pub base_url: String,
     /// API key for authenticating with the upstream.
     #[serde(
         rename = "apiKeyRef",
@@ -58,7 +56,7 @@ pub struct Channel {
     pub api_key: SecretString,
     /// Protocol spoken by the upstream (default).
     pub protocol: String,
-    /// Supported protocols JSON: [{"protocol":"...","path":"..."}].
+    /// Supported protocols JSON: `[{"protocol":"...","baseUrl":"...","rewritePath":"..."}]`.
     pub protocols: String,
     /// Whether this channel was seeded by the system.
     pub is_builtin: bool,
@@ -82,6 +80,10 @@ pub struct Channel {
     pub quota_policy: String,
     /// Channel priority for weighted selection.
     pub priority: u32,
+    /// When set, forces all traffic through this protocol regardless of client format.
+    /// Used for testing protocol bridge functionality.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub force_protocol: Option<String>,
 }
 
 /// Maps a client-facing model name to an upstream model name with pricing.
@@ -271,7 +273,71 @@ pub struct CostAggregate {
     pub request_count: i64,
 }
 
+/// An enabled channel with its bound models, used by the Admin API
+/// `GET /admin/available-channels` endpoint for Claude direct-connect mode.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AvailableChannelInfo {
+    /// Channel ID.
+    pub channel_id: String,
+    /// Human-readable channel name.
+    pub channel_name: String,
+    /// Default protocol for this channel.
+    pub protocol: String,
+    /// Protocols JSON with `base_url` and `rewrite_path`.
+    pub protocols: String,
+    /// Current health status.
+    pub health_status: String,
+    /// Whether the channel is enabled.
+    pub enabled: bool,
+    /// Models bound to this channel.
+    pub models: Vec<AvailableModelInfo>,
+}
+
+/// Compression savings report for a project.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CompressionSavingsReport {
+    /// Total tokens saved by schema compression.
+    pub schema_saved_tokens: i64,
+    /// Total tokens saved by response compression.
+    pub response_saved_tokens: i64,
+    /// Total tokens saved by RTK optimization.
+    pub rtk_saved_tokens: i64,
+    /// Total tokens saved across all compression layers.
+    pub total_saved_tokens: i64,
+}
+
+/// A model bound to a channel, returned as part of [`AvailableChannelInfo`].
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AvailableModelInfo {
+    /// Model mapping ID.
+    pub mapping_id: String,
+    /// Client-facing model name.
+    pub client_name: String,
+    /// Upstream model name sent to the provider.
+    pub upstream_name: String,
+}
+
 // ── Serde helpers for SecretString ────────────────────────────────
+
+/// A single protocol entry in a channel's `protocols` JSON.
+///
+/// Each entry describes how the channel connects to an upstream for a specific protocol.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct ProtocolEntry {
+    /// Protocol identifier: `"anthropic_messages"`, `"openai_chat"`, `"openai_responses"`.
+    pub protocol: String,
+    /// Upstream base URL for this protocol.
+    #[serde(rename = "baseUrl")]
+    pub base_url: String,
+    /// Optional path rewrite. When set, overrides the client request path entirely.
+    /// When `None` or empty, the original request path is passed through.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rewrite_path: Option<String>,
+}
 
 /// Serializes a [`SecretString`] as its exposed string value.
 fn serialize_secret<S>(secret: &SecretString, serializer: S) -> Result<S::Ok, S::Error>
@@ -288,4 +354,100 @@ where
 {
     let s = String::deserialize(deserializer)?;
     Ok(SecretString::new(s.into_boxed_str()))
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used)]
+mod tests {
+    use super::*;
+
+    // ── ProtocolEntry ──────────────────────────────────────────
+
+    #[test]
+    fn test_protocol_entry_deserialize_full() {
+        let json = r#"{"protocol":"openai_chat","baseUrl":"https://api.deepseek.com","rewritePath":"/chat/completions"}"#;
+        let entry: ProtocolEntry = serde_json::from_str(json).unwrap();
+        assert_eq!(entry.protocol, "openai_chat");
+        assert_eq!(entry.base_url, "https://api.deepseek.com");
+        assert_eq!(entry.rewrite_path, Some("/chat/completions".to_string()));
+    }
+
+    #[test]
+    fn test_protocol_entry_deserialize_without_rewrite_path() {
+        let json = r#"{"protocol":"openai_chat","baseUrl":"https://api.deepseek.com"}"#;
+        let entry: ProtocolEntry = serde_json::from_str(json).unwrap();
+        assert_eq!(entry.protocol, "openai_chat");
+        assert_eq!(entry.base_url, "https://api.deepseek.com");
+        assert_eq!(entry.rewrite_path, None);
+    }
+
+    #[test]
+    fn test_protocol_entry_serialize_skips_none_rewrite_path() {
+        let entry = ProtocolEntry {
+            protocol: "anthropic_messages".into(),
+            base_url: "https://api.anthropic.com".into(),
+            rewrite_path: None,
+        };
+        let json = serde_json::to_string(&entry).unwrap();
+        assert!(
+            !json.contains("rewritePath"),
+            "None rewrite_path should be skipped"
+        );
+        assert!(json.contains("baseUrl"));
+    }
+
+    #[test]
+    fn test_protocol_entry_serialize_with_rewrite_path() {
+        let entry = ProtocolEntry {
+            protocol: "anthropic_messages".into(),
+            base_url: "https://api.anthropic.com".into(),
+            rewrite_path: Some("/anthropic/v1/messages".into()),
+        };
+        let json = serde_json::to_string(&entry).unwrap();
+        assert!(json.contains("rewritePath"));
+        assert!(json.contains("/anthropic/v1/messages"));
+    }
+
+    #[test]
+    fn test_protocols_json_array_deserialize() {
+        let json = r#"[
+            {"protocol":"anthropic_messages","baseUrl":"https://api.anthropic.com","rewritePath":"/anthropic/v1/messages"},
+            {"protocol":"openai_chat","baseUrl":"https://api.deepseek.com"}
+        ]"#;
+        let entries: Vec<ProtocolEntry> = serde_json::from_str(json).unwrap();
+        assert_eq!(entries.len(), 2);
+        assert_eq!(entries[0].protocol, "anthropic_messages");
+        assert_eq!(entries[0].base_url, "https://api.anthropic.com");
+        assert_eq!(
+            entries[0].rewrite_path.as_deref(),
+            Some("/anthropic/v1/messages")
+        );
+        assert_eq!(entries[1].protocol, "openai_chat");
+        assert_eq!(entries[1].rewrite_path, None);
+    }
+
+    // ── Channel force_protocol ─────────────────────────────────
+
+    #[test]
+    fn test_channel_force_protocol_none_by_default() {
+        let json = r#"{"id":"test","name":"Test","apiKeyRef":"sk-test","protocol":"openai_chat","protocols":"[]","isBuiltin":false,"enabled":true,"createdAt":0,"updatedAt":0,"healthStatus":"Healthy","consecutiveFailures":0,"billingType":"Metered","monthlyQuota":null,"quotaPolicy":"fallback","priority":1}"#;
+        let ch: Channel = serde_json::from_str(json).unwrap();
+        assert_eq!(ch.force_protocol, None);
+    }
+
+    #[test]
+    fn test_channel_force_protocol_some() {
+        let json = r#"{"id":"test","name":"Test","apiKeyRef":"sk-test","protocol":"anthropic_messages","protocols":"[]","isBuiltin":false,"enabled":true,"createdAt":0,"updatedAt":0,"healthStatus":"Healthy","consecutiveFailures":0,"billingType":"Metered","monthlyQuota":null,"quotaPolicy":"fallback","priority":1,"forceProtocol":"openai_chat"}"#;
+        let ch: Channel = serde_json::from_str(json).unwrap();
+        assert_eq!(ch.force_protocol, Some("openai_chat".to_string()));
+    }
+
+    #[test]
+    fn test_channel_no_base_url_field() {
+        // base_url field should NOT exist in Channel anymore
+        let json = r#"{"id":"test","name":"Test","apiKeyRef":"sk-test","protocol":"openai_chat","protocols":"[]","isBuiltin":false,"enabled":true,"createdAt":0,"updatedAt":0,"healthStatus":"Healthy","consecutiveFailures":0,"billingType":"Metered","monthlyQuota":null,"quotaPolicy":"fallback","priority":1}"#;
+        let ch: Channel = serde_json::from_str(json).unwrap();
+        // Channel deserialization should succeed without base_url
+        assert_eq!(ch.id, "test");
+    }
 }

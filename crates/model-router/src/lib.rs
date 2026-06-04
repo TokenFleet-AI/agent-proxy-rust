@@ -18,6 +18,7 @@ use agent_proxy_rust_core::{
     middleware::ProxyMiddleware,
     types::{ApiFormat, ChannelConfig, ConnectionContext, ProxyRequest, ProxyResponse},
 };
+use agent_proxy_rust_storage::ProtocolEntry;
 use agent_proxy_rust_storage::Storage;
 use async_trait::async_trait;
 use dashmap::DashMap;
@@ -35,11 +36,11 @@ const COOLDOWN: Duration = Duration::from_secs(60);
 struct ResolvedChannel {
     channel_id: String,
     channel_name: String,
-    url: String,
     api_key: secrecy::SecretString,
     protocol: ApiFormat,
-    protocols_json: String,
+    protocols: Vec<ProtocolEntry>,
     enabled: bool,
+    force_protocol: Option<String>,
     mappings: Vec<ResolvedMapping>,
 }
 
@@ -101,6 +102,10 @@ impl ModelRouterMiddleware {
         for ch in storage_channels {
             let protocol = parse_protocol(&ch.protocol)?;
 
+            // Parse protocols JSON into typed entries
+            let protocols: Vec<ProtocolEntry> =
+                serde_json::from_str(&ch.protocols).unwrap_or_default();
+
             let storage_mappings = storage
                 .list_mappings(&ch.id)
                 .await
@@ -129,14 +134,23 @@ impl ModelRouterMiddleware {
                 })
                 .collect();
 
+            // Trim trailing slashes from all base_urls for consistency
+            let protocols: Vec<ProtocolEntry> = protocols
+                .into_iter()
+                .map(|mut p| {
+                    p.base_url = p.base_url.trim_end_matches('/').to_string();
+                    p
+                })
+                .collect();
+
             channels.push(ResolvedChannel {
                 channel_id: ch.id,
                 channel_name: ch.name,
-                url: ch.base_url,
                 api_key: ch.api_key,
                 protocol,
-                protocols_json: ch.protocols.clone(),
+                protocols,
                 enabled: ch.enabled,
+                force_protocol: ch.force_protocol,
                 mappings,
             });
         }
@@ -331,21 +345,45 @@ impl ProxyMiddleware for ModelRouterMiddleware {
             serde_json::to_vec(&body).map_err(|e| ProxyError::BadRequest(e.to_string()))?;
         req.body = bytes::Bytes::from(new_body);
 
-        // Set target protocol
-        ctx.target_protocol = Some(channel.protocol);
+        // Determine target protocol: force_protocol takes priority
+        let target_protocol = if let Some(ref fp) = channel.force_protocol {
+            match parse_protocol(fp) {
+                Ok(p) => {
+                    debug!(
+                        channel = %channel.channel_id,
+                        force_protocol = %fp,
+                        "force_protocol overriding target protocol"
+                    );
+                    p
+                }
+                Err(e) => {
+                    warn!(
+                        channel = %channel.channel_id,
+                        force_protocol = %fp,
+                        error = %e,
+                        "invalid force_protocol, falling back to channel protocol"
+                    );
+                    channel.protocol
+                }
+            }
+        } else {
+            channel.protocol
+        };
 
-        // Resolve upstream URL with protocol path prefix
-        let upstream_url =
-            resolve_upstream_url(&channel.url, channel.protocol, &channel.protocols_json);
+        ctx.target_protocol = Some(target_protocol);
+
+        // Resolve upstream URL from protocols entries
+        let (base_url, rewrite_path) = resolve_upstream_url(target_protocol, &channel.protocols)?;
 
         // Write ChannelConfig to extensions
         ctx.insert(
             EXT_SELECTED_CHANNEL,
             ChannelConfig {
-                url: upstream_url,
+                url: base_url,
                 api_key: channel.api_key.clone(),
-                protocol: channel.protocol,
+                protocol: target_protocol,
                 name: channel.channel_name.clone(),
+                rewrite_path,
             },
         );
 
@@ -438,47 +476,41 @@ impl ProxyMiddleware for ModelRouterMiddleware {
 
 // ── Helpers ─────────────────────────────────────────────────────────
 
-/// Builds the full upstream URL by resolving the protocol-specific path prefix
-/// from `protocols_json` and prepending it to `base_url`.
+/// Resolves the upstream URL for a given protocol from the channel's `protocols` entries.
 ///
-/// Each channel's `protocols` JSON contains an array like:
-/// ```json
-/// [{"protocol":"openai_chat","path":"/v1/chat/completions"},{"protocol":"anthropic_messages","path":"/anthropic"}]
-/// ```
+/// Returns the `(base_url, rewrite_path)` tuple for the matching protocol entry.
+/// `rewrite_path` is `None` when the entry does not specify a path rewrite — the
+/// original request path should be passed through.
 ///
-/// The matching entry's `path` is used as a prefix, so the final upstream URL
-/// becomes `{base_url}{path_prefix}`. The request path is appended later by
-/// `forward_to_upstream`.
-fn resolve_upstream_url(base_url: &str, protocol: ApiFormat, protocols_json: &str) -> String {
-    let base = base_url.trim_end_matches('/').to_string();
-    let target_protocol = protocol_to_str(protocol);
+/// # Errors
+///
+/// Returns `ProxyError::Internal` if no entry matches the target protocol or
+/// if the matched entry has an empty `base_url`.
+fn resolve_upstream_url(
+    protocol: ApiFormat,
+    protocols: &[ProtocolEntry],
+) -> Result<(String, Option<String>), ProxyError> {
+    let target = protocol_to_str(protocol);
 
-    let path_prefix = protocols_json
-        .parse::<serde_json::Value>()
-        .ok()
-        .and_then(|v| v.as_array().cloned())
-        .into_iter()
-        .flatten()
-        .find_map(|entry| {
-            let matches = entry
-                .get("protocol")
-                .and_then(|p| p.as_str())
-                .is_some_and(|p| p == target_protocol);
-            if matches {
-                entry
-                    .get("path")
-                    .and_then(|p| p.as_str())
-                    .map(|s| s.trim_end_matches('/').to_string())
-            } else {
-                None
-            }
-        })
-        .unwrap_or_default();
+    let entry = protocols
+        .iter()
+        .find(|e| e.protocol == target)
+        .ok_or_else(|| {
+            ProxyError::Internal(anyhow::anyhow!(
+                "no protocol entry for '{target}' in channel protocols"
+            ))
+        })?;
 
-    format!("{base}{path_prefix}")
+    if entry.base_url.is_empty() {
+        return Err(ProxyError::Internal(anyhow::anyhow!(
+            "protocol entry '{target}' has empty base_url"
+        )));
+    }
+
+    Ok((entry.base_url.clone(), entry.rewrite_path.clone()))
 }
 
-/// Returns the snake_case string representation for an [`ApiFormat`] variant,
+/// Returns the `snake_case` string representation for an [`ApiFormat`] variant,
 /// matching the format used in the `protocols` JSON column.
 fn protocol_to_str(protocol: ApiFormat) -> &'static str {
     match protocol {
@@ -531,16 +563,17 @@ mod tests {
         id: &str,
         name: &str,
         protocol: ApiFormat,
+        protocols: Vec<ProtocolEntry>,
         mappings: Vec<ResolvedMapping>,
     ) -> ResolvedChannel {
         ResolvedChannel {
             channel_id: id.into(),
             channel_name: name.into(),
-            url: format!("https://{id}.example.com"),
             api_key: secrecy::SecretString::from("sk-test"),
             protocol,
-            protocols_json: String::new(),
+            protocols,
             enabled: true,
+            force_protocol: None,
             mappings,
         }
     }
@@ -560,6 +593,14 @@ mod tests {
                 on_exhausted: exhausted,
             },
         }
+    }
+
+    fn make_protocols(protocol: ApiFormat, base_url: &str) -> Vec<ProtocolEntry> {
+        vec![ProtocolEntry {
+            protocol: protocol_to_str(protocol).to_string(),
+            base_url: base_url.to_string(),
+            rewrite_path: None,
+        }]
     }
 
     fn make_mapping_metered(client: &str, upstream: &str) -> ResolvedMapping {
@@ -597,6 +638,7 @@ mod tests {
                 "sub",
                 "Subscription",
                 ApiFormat::AnthropicMessages,
+                make_protocols(ApiFormat::AnthropicMessages, "https://sub.example.com"),
                 vec![make_mapping_flatfee(
                     "claude-sonnet",
                     "claude-sonnet-4-7",
@@ -607,6 +649,7 @@ mod tests {
                 "metered",
                 "Metered",
                 ApiFormat::AnthropicMessages,
+                make_protocols(ApiFormat::AnthropicMessages, "https://metered.example.com"),
                 vec![make_mapping_metered("claude-sonnet", "claude-opus-4-7")],
             ),
         ]);
@@ -624,6 +667,7 @@ mod tests {
                 "sub-exhausted",
                 "Subscription",
                 ApiFormat::AnthropicMessages,
+                make_protocols(ApiFormat::AnthropicMessages, "https://sub.example.com"),
                 vec![ResolvedMapping {
                     mapping_id: "flatfee-exhausted".into(),
                     client_name: "claude-sonnet".into(),
@@ -639,6 +683,7 @@ mod tests {
                 "metered",
                 "Metered",
                 ApiFormat::AnthropicMessages,
+                make_protocols(ApiFormat::AnthropicMessages, "https://metered.example.com"),
                 vec![make_mapping_metered("claude-sonnet", "claude-opus-4-7")],
             ),
         ]);
@@ -654,6 +699,7 @@ mod tests {
             "sub-blocked",
             "Subscription",
             ApiFormat::AnthropicMessages,
+            make_protocols(ApiFormat::AnthropicMessages, "https://sub.example.com"),
             vec![ResolvedMapping {
                 mapping_id: "flatfee-blocked".into(),
                 client_name: "claude-sonnet".into(),
@@ -678,12 +724,14 @@ mod tests {
                 "m1",
                 "Metered1",
                 ApiFormat::AnthropicMessages,
+                make_protocols(ApiFormat::AnthropicMessages, "https://m1.example.com"),
                 vec![make_mapping_metered("claude-sonnet", "claude-opus-4-7")],
             ),
             make_channel(
                 "m2",
                 "Metered2",
                 ApiFormat::AnthropicMessages,
+                make_protocols(ApiFormat::AnthropicMessages, "https://m2.example.com"),
                 vec![make_mapping_metered("claude-sonnet", "claude-haiku-4-5")],
             ),
         ]);
@@ -702,6 +750,7 @@ mod tests {
             "m1",
             "Metered1",
             ApiFormat::AnthropicMessages,
+            make_protocols(ApiFormat::AnthropicMessages, "https://m1.example.com"),
             vec![make_mapping_metered("claude-sonnet", "claude-opus-4-7")],
         )]);
 
@@ -716,11 +765,14 @@ mod tests {
             channels: vec![ResolvedChannel {
                 channel_id: "disabled".into(),
                 channel_name: "Disabled".into(),
-                url: "https://disabled.example.com".into(),
                 api_key: secrecy::SecretString::from("sk-test"),
                 protocol: ApiFormat::AnthropicMessages,
-                protocols_json: String::new(),
+                protocols: make_protocols(
+                    ApiFormat::AnthropicMessages,
+                    "https://disabled.example.com",
+                ),
                 enabled: false,
+                force_protocol: None,
                 mappings: vec![make_mapping_metered("claude-sonnet", "claude-opus-4-7")],
             }],
             health: Arc::new(DashMap::new()),
@@ -728,6 +780,56 @@ mod tests {
 
         let candidates = mw.find_candidates("claude-sonnet");
         assert!(candidates.is_empty());
+    }
+
+    // ── resolve_upstream_url ────────────────────────────────────
+
+    #[test]
+    fn test_resolve_upstream_url_returns_base_url_and_rewrite_path() {
+        let protocols = vec![ProtocolEntry {
+            protocol: "openai_chat".into(),
+            base_url: "https://api.deepseek.com".into(),
+            rewrite_path: Some("/chat/completions".into()),
+        }];
+        let (base_url, rewrite_path) =
+            resolve_upstream_url(ApiFormat::OpenaiChat, &protocols).unwrap();
+        assert_eq!(base_url, "https://api.deepseek.com");
+        assert_eq!(rewrite_path, Some("/chat/completions".into()));
+    }
+
+    #[test]
+    fn test_resolve_upstream_url_no_rewrite_path() {
+        let protocols = vec![ProtocolEntry {
+            protocol: "openai_chat".into(),
+            base_url: "https://api.deepseek.com".into(),
+            rewrite_path: None,
+        }];
+        let (base_url, rewrite_path) =
+            resolve_upstream_url(ApiFormat::OpenaiChat, &protocols).unwrap();
+        assert_eq!(base_url, "https://api.deepseek.com");
+        assert_eq!(rewrite_path, None);
+    }
+
+    #[test]
+    fn test_resolve_upstream_url_no_matching_protocol() {
+        let protocols = vec![ProtocolEntry {
+            protocol: "openai_chat".into(),
+            base_url: "https://api.deepseek.com".into(),
+            rewrite_path: None,
+        }];
+        let result = resolve_upstream_url(ApiFormat::AnthropicMessages, &protocols);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_resolve_upstream_url_empty_base_url() {
+        let protocols = vec![ProtocolEntry {
+            protocol: "openai_chat".into(),
+            base_url: String::new(),
+            rewrite_path: None,
+        }];
+        let result = resolve_upstream_url(ApiFormat::OpenaiChat, &protocols);
+        assert!(result.is_err());
     }
 
     // ── Health tracking ─────────────────────────────────────────

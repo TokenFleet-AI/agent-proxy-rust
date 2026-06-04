@@ -125,7 +125,10 @@ impl CostMiddleware {
             id: uuid::Uuid::now_v7().to_string(),
             channel_id,
             project: ctx.project_path.clone().unwrap_or_default(),
-            user_id: self.user_name.clone(),
+            user_id: ctx
+                .user_name
+                .clone()
+                .unwrap_or_else(|| self.user_name.clone()),
             agent_type: ctx.agent_type.to_string(),
             input_tokens: usage.input_tokens as i64,
             output_tokens: usage.output_tokens as i64,

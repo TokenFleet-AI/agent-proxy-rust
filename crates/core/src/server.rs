@@ -205,6 +205,7 @@ impl std::fmt::Debug for AgentProxyBuilder {
         f.debug_struct("AgentProxyBuilder")
             .field("config", &self.config)
             .field("middlewares", &mw_names)
+            .field("cost_recorder", &self.cost_recorder.is_some())
             .finish()
     }
 }
@@ -215,6 +216,7 @@ impl std::fmt::Debug for AgentProxy {
         f.debug_struct("AgentProxy")
             .field("config", &self.config)
             .field("middlewares", &mw_names)
+            .field("cost_recorder", &self.cost_recorder.is_some())
             .finish()
     }
 }
@@ -260,6 +262,7 @@ async fn handle_health() -> Json<serde_json::Value> {
 /// 5. Forwards to upstream (streaming or non-streaming).
 /// 6. Runs the `on_response` middleware chain.
 /// 7. Returns the response to the client.
+#[allow(clippy::too_many_lines)]
 async fn handle_proxy_request(
     State(state): State<Arc<ProxyState>>,
     req: Request<Body>,
@@ -341,7 +344,7 @@ async fn handle_proxy_request(
         .iter()
         .find(|(k, _)| k.as_str().eq_ignore_ascii_case("x-claude-code-session-id"))
         .and_then(|(_, v)| v.to_str().ok())
-        .map(|s| s.to_string());
+        .map(ToString::to_string);
 
     let mut project_path = proxy_req
         .headers
@@ -351,7 +354,7 @@ async fn handle_proxy_request(
             key == "x-claude-code-project-path" || key == "x-project-path"
         })
         .and_then(|(_, v)| v.to_str().ok())
-        .map(|s| s.to_string());
+        .map(ToString::to_string);
 
     // Log all x-* headers and billing-relevant fields for debugging
     let billing_headers: Vec<String> = proxy_req
@@ -383,6 +386,10 @@ async fn handle_proxy_request(
             if project_path.is_none() {
                 project_path = acc.project_path;
             }
+            // Fallback: extract user_name from report
+            if ctx.user_name.is_none() {
+                ctx.user_name = acc.user_name;
+            }
         }
     }
 
@@ -406,11 +413,9 @@ async fn handle_proxy_request(
     let channel = ctx.get::<crate::types::ChannelConfig>(crate::extensions::EXT_SELECTED_CHANNEL);
 
     if let Some(ch) = channel {
-        let url = ch.url.clone();
-        let api_key = ch.api_key.expose_secret().to_owned();
         let is_streaming = proxy_req.is_streaming();
 
-        match forward_to_upstream(&state.client, &proxy_req, &url, Some(&api_key)).await {
+        match forward_to_upstream(&state.client, &proxy_req, ch).await {
             Ok(upstream_resp) => {
                 if is_streaming {
                     handle_streaming_response(upstream_resp, &state, &ctx).await
@@ -471,16 +476,15 @@ async fn handle_non_streaming_response(
     }
 
     // Cost recording (fire-and-forget — failures are logged but don't block)
-    if let Some(ref cr) = state.cost_recorder {
-        if let Ok(body_json) = serde_json::from_slice::<serde_json::Value>(&proxy_resp.body) {
-            if let Err(e) = cr.record(ctx, &body_json).await {
-                tracing::warn!(
-                    request_id = ctx.request_id,
-                    error = %e,
-                    "cost recording failed"
-                );
-            }
-        }
+    if let Some(ref cr) = state.cost_recorder
+        && let Ok(body_json) = serde_json::from_slice::<serde_json::Value>(&proxy_resp.body)
+        && let Err(e) = cr.record(ctx, &body_json).await
+    {
+        tracing::warn!(
+            request_id = ctx.request_id,
+            error = %e,
+            "cost recording failed"
+        );
     }
 
     build_axum_response(proxy_resp)
@@ -570,14 +574,19 @@ fn validate_proxy_request(req: &ProxyRequest) -> Result<(), ProxyError> {
 }
 
 /// Forwards the proxy request to the upstream server.
+///
+/// Uses `channel.rewrite_path` if set, otherwise passes through the
+/// (possibly bridge-rewritten) `proxy_req.path`.
 async fn forward_to_upstream(
     client: &reqwest::Client,
     proxy_req: &ProxyRequest,
-    upstream_url: &str,
-    api_key: Option<&str>,
+    channel: &crate::types::ChannelConfig,
 ) -> Result<reqwest::Response, ProxyError> {
-    // Build the upstream URL: base + request path.
-    let url = format!("{}{}", upstream_url.trim_end_matches('/'), proxy_req.path);
+    let api_key_str = channel.api_key.expose_secret().to_owned();
+
+    // Use rewrite_path if set, otherwise use the original request path
+    let path = channel.rewrite_path.as_deref().unwrap_or(&proxy_req.path);
+    let url = format!("{}{}", channel.url.trim_end_matches('/'), path);
 
     let mut req_builder = client
         .request(proxy_req.method.clone(), &url)
@@ -603,8 +612,8 @@ async fn forward_to_upstream(
     }
 
     // Inject upstream auth
-    if let Some(key) = api_key {
-        req_builder = req_builder.header("Authorization", format!("Bearer {key}"));
+    if !api_key_str.is_empty() {
+        req_builder = req_builder.header("Authorization", format!("Bearer {api_key_str}"));
     }
 
     req_builder.send().await.map_err(|e| {
@@ -686,15 +695,14 @@ fn log_error(err: &ProxyError, ctx: &ConnectionContext) {
 ///
 /// Parses `data:` lines looking for usage-bearing events:
 /// - **Anthropic**: `message_delta` event with `usage` field
-/// - **OpenAI Chat**: last chunk with `usage` field (before `[DONE]`)
-/// - **OpenAI Responses**: `response.completed` event with `usage` field
+/// - **`OpenAI` Chat**: last chunk with `usage` field (before `[DONE]`)
+/// - **`OpenAI` Responses**: `response.completed` event with `usage` field
 ///
 /// The last usage event wins, matching the upstream API behavior where
 /// usage is reported at the end of the stream.
 fn extract_usage_from_sse(body: &[u8]) -> serde_json::Value {
-    let text = match std::str::from_utf8(body) {
-        Ok(t) => t,
-        Err(_) => return serde_json::Value::Null,
+    let Ok(text) = std::str::from_utf8(body) else {
+        return serde_json::Value::Null;
     };
 
     let mut last_usage: Option<serde_json::Value> = None;
@@ -709,28 +717,28 @@ fn extract_usage_from_sse(body: &[u8]) -> serde_json::Value {
         };
 
         // Anthropic message_delta
-        if event.get("type").and_then(|v| v.as_str()) == Some("message_delta") {
-            if let Some(u) = event.get("usage") {
-                last_usage = Some(u.clone());
-            }
+        if event.get("type").and_then(|v| v.as_str()) == Some("message_delta")
+            && let Some(u) = event.get("usage")
+        {
+            last_usage = Some(u.clone());
         }
         // Anthropic message_start (may include usage)
-        if event.get("type").and_then(|v| v.as_str()) == Some("message_start") {
-            if let Some(u) = event.get("message").and_then(|m| m.get("usage")) {
-                last_usage = Some(u.clone());
-            }
+        if event.get("type").and_then(|v| v.as_str()) == Some("message_start")
+            && let Some(u) = event.get("message").and_then(|m| m.get("usage"))
+        {
+            last_usage = Some(u.clone());
         }
         // OpenAI Responses completed
-        if event.get("type").and_then(|v| v.as_str()) == Some("response.completed") {
-            if let Some(u) = event.get("response").and_then(|r| r.get("usage")) {
-                last_usage = Some(u.clone());
-            }
+        if event.get("type").and_then(|v| v.as_str()) == Some("response.completed")
+            && let Some(u) = event.get("response").and_then(|r| r.get("usage"))
+        {
+            last_usage = Some(u.clone());
         }
         // OpenAI Chat: has "choices" and "usage"
-        if event.get("choices").is_some() {
-            if let Some(u) = event.get("usage") {
-                last_usage = Some(u.clone());
-            }
+        if event.get("choices").is_some()
+            && let Some(u) = event.get("usage")
+        {
+            last_usage = Some(u.clone());
         }
     }
 
@@ -772,6 +780,7 @@ mod tests {
                     api_key: secrecy::SecretString::from("sk-test"),
                     protocol: ApiFormat::AnthropicMessages,
                     name: "test".into(),
+                    rewrite_path: None,
                 },
             );
             Ok(())
