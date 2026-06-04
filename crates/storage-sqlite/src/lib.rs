@@ -683,7 +683,7 @@ impl Storage for SqliteStorage {
             let mut stmt = conn
                 .prepare(
                     "SELECT id, channel_id, client_name, upstream_name, billing, pricing_json, \
-                     weight, enabled
+                     weight, enabled, protocols
                      FROM model_mappings WHERE channel_id = ?1 ORDER BY id",
                 )
                 .map_err(|e| StorageError::Backend(e.to_string()))?;
@@ -698,6 +698,7 @@ impl Storage for SqliteStorage {
                         pricing_json: row.get(5)?,
                         weight: row.get(6)?,
                         enabled: row.get(7)?,
+                        protocols: row.get(8)?,
                     })
                 })
                 .map_err(|e| StorageError::Backend(e.to_string()))?;
@@ -720,6 +721,7 @@ impl Storage for SqliteStorage {
         let pricing_json = mapping.pricing_json.clone();
         let weight = mapping.weight;
         let enabled = mapping.enabled;
+        let protocols = mapping.protocols.clone();
         let pool = self.get_pool();
 
         tokio::task::spawn_blocking(move || {
@@ -728,8 +730,8 @@ impl Storage for SqliteStorage {
                 .map_err(|e| StorageError::Connection(e.to_string()))?;
             conn.execute(
                 "INSERT INTO model_mappings (id, channel_id, client_name, upstream_name, billing, \
-                 pricing_json, weight, enabled)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
+                 pricing_json, weight, enabled, protocols)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
                  ON CONFLICT(id) DO UPDATE SET
                    channel_id = excluded.channel_id,
                    client_name = excluded.client_name,
@@ -737,7 +739,8 @@ impl Storage for SqliteStorage {
                    billing = excluded.billing,
                    pricing_json = excluded.pricing_json,
                    weight = excluded.weight,
-                   enabled = excluded.enabled",
+                   enabled = excluded.enabled,
+                   protocols = excluded.protocols",
                 params![
                     id,
                     channel_id,
@@ -747,6 +750,7 @@ impl Storage for SqliteStorage {
                     pricing_json,
                     weight,
                     enabled,
+                    protocols,
                 ],
             )
             .map_err(|e| {
@@ -811,7 +815,7 @@ impl Storage for SqliteStorage {
         tokio::task::spawn_blocking(move || {
             let conn = pool.get().map_err(|e| StorageError::Connection(e.to_string()))?;
             let mut stmt = conn
-                .prepare("SELECT id, channel_id, client_name, upstream_name, billing, pricing_json, weight, enabled FROM model_mappings ORDER BY channel_id, client_name")
+                .prepare("SELECT id, channel_id, client_name, upstream_name, billing, pricing_json, weight, enabled, protocols FROM model_mappings ORDER BY channel_id, client_name")
                 .map_err(|e| StorageError::Backend(e.to_string()))?;
             let rows = stmt
                 .query_map([], |row| {
@@ -824,6 +828,7 @@ impl Storage for SqliteStorage {
                         pricing_json: row.get(5)?,
                         weight: row.get(6)?,
                         enabled: row.get(7)?,
+                        protocols: row.get(8)?,
                     })
                 })
                 .map_err(|e| StorageError::Backend(e.to_string()))?;

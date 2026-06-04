@@ -38,8 +38,18 @@ async fn main() -> Result<()> {
     let storage: Arc<dyn Storage> = Arc::new(db_storage);
     let model_router = ModelRouterMiddleware::from_storage(storage.clone()).await?;
 
+    // Share the in-memory health map and API-key map with the admin API so
+    // that runtime changes (e.g. setting an API key) take effect immediately.
+    let health_map = Arc::clone(model_router.health_map());
+    let api_key_map = Arc::clone(model_router.api_key_map());
+
     let admin_key = admin_auth::resolve_admin_key();
-    let admin = admin::admin_routes(storage.clone(), Some(admin_key.clone()));
+    let admin = admin::admin_routes(
+        storage.clone(),
+        Some(admin_key.clone()),
+        health_map,
+        api_key_map,
+    );
 
     eprintln!("[agent-proxy] Admin key: {admin_key}");
 
@@ -89,9 +99,10 @@ fn parse_db_path() -> PathBuf {
     if let Ok(p) = std::env::var("AGENT_PROXY_DB_PATH") {
         return PathBuf::from(p);
     }
-    // 3. Default: ~/.tokenfleet-ai/token-fleet-switch
+    // 3. Default: ~/.tokenfleet-ai/token-fleet-switch/agent-proxy.db
     dirs::home_dir()
         .unwrap_or_else(|| PathBuf::from("."))
         .join(".tokenfleet-ai")
         .join("token-fleet-switch")
+        .join("agent-proxy.db")
 }

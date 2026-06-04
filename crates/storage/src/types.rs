@@ -55,6 +55,10 @@ pub struct Channel {
     )]
     pub api_key: SecretString,
     /// Protocol spoken by the upstream (default).
+    ///
+    /// **Deprecated for runtime use.** Protocol selection is now derived from
+    /// [`protocols`](Self::protocols) at request time. This field is retained
+    /// for DB backward compatibility and admin UI display only.
     pub protocol: String,
     /// Supported protocols JSON: `[{"protocol":"...","baseUrl":"...","rewritePath":"..."}]`.
     pub protocols: String,
@@ -106,6 +110,26 @@ pub struct ModelMapping {
     pub weight: u32,
     /// Whether this mapping is active.
     pub enabled: bool,
+    /// Protocols this mapping is valid for (JSON array of strings).
+    ///
+    /// Empty array `[]` means the mapping works with all protocols the channel
+    /// supports (backward compatible). When non-empty, only the listed protocols
+    /// are considered valid for this mapping — the router will bridge to a
+    /// compatible protocol when the client's format does not match.
+    ///
+    /// Example: `'["openai_chat"]'` constrains a mapping to the `OpenAI` Chat
+    /// protocol only, preventing the router from forwarding requests via
+    /// `anthropic_messages` when the upstream model does not support that
+    /// protocol.
+    #[serde(default, skip_serializing_if = "is_empty_protocols")]
+    pub protocols: String,
+}
+
+/// Returns `true` when the protocols string is empty or represents an empty
+/// JSON array — used by serde `skip_serializing_if` to keep the wire format
+/// compact.
+fn is_empty_protocols(s: &str) -> bool {
+    s.is_empty() || s == "[]"
 }
 
 /// A single proxied request with token usage and cost.

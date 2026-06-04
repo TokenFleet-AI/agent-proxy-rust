@@ -25,7 +25,8 @@ use dashmap::DashMap;
 use secrecy::ExposeSecret;
 use tracing::{debug, warn};
 pub use types::{
-    ChannelBilling, ChannelHealth, ChannelState, ExhaustedAction, Pricing, Quota, QuotaUsage,
+    BillingDimension, ChannelBilling, ChannelHealth, ChannelState, ExhaustedAction, Pricing,
+    PricingTier, Quota, QuotaUsage, TierPrice,
 };
 
 /// Cooldown period before an unhealthy channel is retried.
@@ -37,11 +38,19 @@ struct ResolvedChannel {
     channel_id: String,
     channel_name: String,
     api_key: secrecy::SecretString,
-    protocol: ApiFormat,
     protocols: Vec<ProtocolEntry>,
     enabled: bool,
     force_protocol: Option<String>,
+    priority: u32,
     mappings: Vec<ResolvedMapping>,
+}
+
+impl ResolvedChannel {
+    /// Returns the protocol identifiers supported by this channel.
+    #[allow(dead_code)]
+    fn supported_protocols(&self) -> Vec<&str> {
+        self.protocols.iter().map(|p| p.protocol.as_str()).collect()
+    }
 }
 
 /// Parsed in-memory representation of a model mapping.
@@ -51,6 +60,8 @@ struct ResolvedMapping {
     client_name: String,
     upstream_name: String,
     billing: ChannelBilling,
+    /// Protocols this mapping is valid for. Empty = all protocols (backward compatible).
+    allowed_protocols: Vec<String>,
 }
 
 /// Lightweight mapping info stored in the context extension.
@@ -73,12 +84,26 @@ pub struct SelectedMappingInfo {
 }
 
 /// Channel selection and model routing middleware.
-#[derive(Debug)]
 pub struct ModelRouterMiddleware {
     channels: Vec<ResolvedChannel>,
     health: Arc<DashMap<String, ChannelState>>,
     /// Per-mapping-id quota consumption counters. Keys match `model_mappings.id`.
     quota_usage: Arc<DashMap<String, QuotaUsage>>,
+    /// Shared API key overrides: populated at startup from DB, updated at
+    /// runtime by the admin API. The router looks up keys here first,
+    /// falling back to the `ResolvedChannel::api_key`.
+    channel_api_keys: Arc<DashMap<String, secrecy::SecretString>>,
+}
+
+impl std::fmt::Debug for ModelRouterMiddleware {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ModelRouterMiddleware")
+            .field("channels", &self.channels)
+            .field("health", &self.health)
+            .field("quota_usage", &self.quota_usage)
+            .field("channel_api_keys", &"<DashMap>")
+            .finish()
+    }
 }
 
 impl ModelRouterMiddleware {
@@ -100,11 +125,16 @@ impl ModelRouterMiddleware {
         let mut channels = Vec::with_capacity(storage_channels.len());
 
         for ch in storage_channels {
-            let protocol = parse_protocol(&ch.protocol)?;
-
-            // Parse protocols JSON into typed entries
+            // Parse protocols JSON into typed entries; skip channels with no protocols
             let protocols: Vec<ProtocolEntry> =
                 serde_json::from_str(&ch.protocols).unwrap_or_default();
+            if protocols.is_empty() {
+                warn!(
+                    channel = %ch.id,
+                    "channel has no protocols configured, skipping"
+                );
+                continue;
+            }
 
             let storage_mappings = storage
                 .list_mappings(&ch.id)
@@ -125,20 +155,24 @@ impl ModelRouterMiddleware {
                             );
                         })
                         .ok()?;
+                    let allowed_protocols: Vec<String> =
+                        serde_json::from_str(&m.protocols).unwrap_or_default();
                     Some(ResolvedMapping {
                         mapping_id: m.id,
                         client_name: m.client_name,
                         upstream_name: m.upstream_name,
                         billing,
+                        allowed_protocols,
                     })
                 })
                 .collect();
 
-            // Trim trailing slashes from all base_urls for consistency
+            // Normalize: trim trailing slashes and treat empty rewrite_path as None
             let protocols: Vec<ProtocolEntry> = protocols
                 .into_iter()
                 .map(|mut p| {
                     p.base_url = p.base_url.trim_end_matches('/').to_string();
+                    p.rewrite_path = p.rewrite_path.filter(|rp| !rp.is_empty());
                     p
                 })
                 .collect();
@@ -147,21 +181,26 @@ impl ModelRouterMiddleware {
                 channel_id: ch.id,
                 channel_name: ch.name,
                 api_key: ch.api_key,
-                protocol,
                 protocols,
                 enabled: ch.enabled,
                 force_protocol: ch.force_protocol,
+                priority: ch.priority,
                 mappings,
             });
         }
 
-        // Mark channels without API keys as Unavailable (DB only, for UI display)
+        // Pre-populate the in-memory health map: channels without API keys
+        // start as Unhealthy so the router won't select them. Also persist
+        // the status to DB so the Admin API reflects it.
+        let health: Arc<DashMap<String, ChannelState>> = Arc::new(DashMap::new());
         for ch in &channels {
             if ch.api_key.expose_secret().is_empty() {
-                if let Err(e) = storage.set_channel_enabled(&ch.channel_id, true).await {
-                    tracing::warn!(channel=%ch.channel_id, error=%e, "failed to check channel");
-                }
-                // Persist Unavailable status to DB so Admin API shows it
+                // Mark unhealthy in-memory (3 consecutive failures → Unhealthy + cooldown)
+                health
+                    .entry(ch.channel_id.clone())
+                    .or_default()
+                    .mark_unhealthy();
+                // Persist to DB for admin UI display
                 let _ = storage.record_channel_failure(&ch.channel_id).await;
                 let _ = storage.record_channel_failure(&ch.channel_id).await;
                 let _ = storage.record_channel_failure(&ch.channel_id).await;
@@ -169,10 +208,22 @@ impl ModelRouterMiddleware {
             }
         }
 
+        // Build the shared API-key override map from the DB values.
+        // When the admin API updates a key, it writes here so the router
+        // picks up the new key without a restart.
+        let channel_api_keys: Arc<DashMap<String, secrecy::SecretString>> =
+            Arc::new(DashMap::new());
+        for ch in &channels {
+            if !ch.api_key.expose_secret().is_empty() {
+                channel_api_keys.insert(ch.channel_id.clone(), ch.api_key.clone());
+            }
+        }
+
         Ok(Self {
             channels,
-            health: Arc::new(DashMap::new()),
+            health,
             quota_usage: Arc::new(DashMap::new()),
+            channel_api_keys,
         })
     }
 
@@ -180,6 +231,15 @@ impl ModelRouterMiddleware {
     #[must_use]
     pub fn health_map(&self) -> &Arc<DashMap<String, ChannelState>> {
         &self.health
+    }
+
+    /// Returns a reference to the shared API-key override map.
+    ///
+    /// The admin API writes updated keys here so the router picks them up
+    /// at request time without needing a restart.
+    #[must_use]
+    pub fn api_key_map(&self) -> &Arc<DashMap<String, secrecy::SecretString>> {
+        &self.channel_api_keys
     }
 
     /// Finds all candidate mappings for a given client model name.
@@ -204,9 +264,13 @@ impl ModelRouterMiddleware {
         candidates: &[(&'a ResolvedChannel, &'a ResolvedMapping)],
         client_name: &str,
     ) -> Result<(&'a ResolvedChannel, &'a ResolvedMapping), ProxyError> {
-        let (flatfee, metered): (Vec<_>, Vec<_>) = candidates
+        let (mut flatfee, mut metered): (Vec<_>, Vec<_>) = candidates
             .iter()
             .partition(|(_, m)| m.billing.is_flat_fee());
+
+        // Sort by channel priority: higher = selected first
+        flatfee.sort_by_key(|(ch, _)| std::cmp::Reverse(ch.priority));
+        metered.sort_by_key(|(ch, _)| std::cmp::Reverse(ch.priority));
 
         // Phase 1: try FlatFee channels first
         for (ch, m) in &flatfee {
@@ -302,6 +366,7 @@ impl ModelRouterMiddleware {
 
 #[async_trait]
 impl ProxyMiddleware for ModelRouterMiddleware {
+    #[allow(clippy::too_many_lines)]
     async fn on_request(
         &self,
         req: &mut ProxyRequest,
@@ -345,42 +410,75 @@ impl ProxyMiddleware for ModelRouterMiddleware {
             serde_json::to_vec(&body).map_err(|e| ProxyError::BadRequest(e.to_string()))?;
         req.body = bytes::Bytes::from(new_body);
 
-        // Determine target protocol: force_protocol takes priority
-        let target_protocol = if let Some(ref fp) = channel.force_protocol {
-            match parse_protocol(fp) {
-                Ok(p) => {
+        // Determine target protocol using the 3-step resolution
+        let mut target_protocol = resolve_target_protocol(
+            channel.force_protocol.as_deref(),
+            ctx.detected_format,
+            &channel.protocols,
+        )?;
+
+        // ── Protocol-model compatibility check ───────────────────────
+        //
+        // If the mapping declares protocol constraints (e.g. a model only
+        // works on openai_chat), validate that the resolved protocol is
+        // compatible. When it isn't, switch to the first protocol that
+        // both the mapping and the channel support — the bridge middleware
+        // will handle format conversion.
+        if !mapping.allowed_protocols.is_empty() {
+            let target_str = protocol_to_str(target_protocol);
+            if !mapping.allowed_protocols.iter().any(|p| p == target_str) {
+                // Resolved protocol is not in the mapping's allowed list.
+                // Find the first protocol the channel supports that the
+                // mapping also allows.
+                let compatible = channel.protocols.iter().find(|pe| {
+                    mapping
+                        .allowed_protocols
+                        .iter()
+                        .any(|ap| ap == &pe.protocol)
+                });
+                if let Some(entry) = compatible {
                     debug!(
                         channel = %channel.channel_id,
-                        force_protocol = %fp,
-                        "force_protocol overriding target protocol"
+                        mapping = %mapping.mapping_id,
+                        resolved = %target_str,
+                        switched_to = %entry.protocol,
+                        "mapping protocol constraint: switching target protocol"
                     );
-                    p
-                }
-                Err(e) => {
-                    warn!(
-                        channel = %channel.channel_id,
-                        force_protocol = %fp,
-                        error = %e,
-                        "invalid force_protocol, falling back to channel protocol"
-                    );
-                    channel.protocol
+                    target_protocol = parse_protocol(&entry.protocol)?;
+                } else {
+                    let channel_prots: Vec<&str> = channel
+                        .protocols
+                        .iter()
+                        .map(|p| p.protocol.as_str())
+                        .collect();
+                    return Err(ProxyError::Internal(anyhow::anyhow!(
+                        "mapping '{}' protocol constraint {:?} incompatible with channel protocols {channel_prots:?}",
+                        mapping.mapping_id,
+                        mapping.allowed_protocols,
+                    )));
                 }
             }
-        } else {
-            channel.protocol
-        };
+        }
 
         ctx.target_protocol = Some(target_protocol);
 
         // Resolve upstream URL from protocols entries
         let (base_url, rewrite_path) = resolve_upstream_url(target_protocol, &channel.protocols)?;
 
+        // Look up the API key from the shared override map first (so admin
+        // API updates take effect without a restart), falling back to the
+        // key that was loaded at startup.
+        let api_key = self
+            .channel_api_keys
+            .get(&channel.channel_id)
+            .map_or_else(|| channel.api_key.clone(), |r| r.clone());
+
         // Write ChannelConfig to extensions
         ctx.insert(
             EXT_SELECTED_CHANNEL,
             ChannelConfig {
                 url: base_url,
-                api_key: channel.api_key.clone(),
+                api_key,
                 protocol: target_protocol,
                 name: channel.channel_name.clone(),
                 rewrite_path,
@@ -439,16 +537,18 @@ impl ProxyMiddleware for ModelRouterMiddleware {
                 .record_usage(token_count);
         }
 
-        if res.status.is_server_error() {
+        if res.status.is_server_error() || res.status == http::StatusCode::UNAUTHORIZED {
             // 5xx: immediate unhealthy — server is down
+            // 401: authentication failure — API key is missing, invalid, or expired
             warn!(
                 channel = %channel_id,
                 status = %res.status,
-                "upstream 5xx, marking channel unhealthy immediately"
+                "upstream {}, marking channel unhealthy immediately",
+                if res.status.is_server_error() { "5xx" } else { "401 Unauthorized" }
             );
             self.mark_unhealthy_immediate(&channel_id);
         } else if res.status.is_client_error() && res.status.as_u16() != 429 {
-            // 4xx (except 429): client errors — not the channel's fault
+            // 4xx (except 401, 429): client errors — not the channel's fault
             debug!(
                 channel = %channel_id,
                 status = %res.status,
@@ -475,6 +575,55 @@ impl ProxyMiddleware for ModelRouterMiddleware {
 }
 
 // ── Helpers ─────────────────────────────────────────────────────────
+
+/// Resolves the target protocol for a request using a 3-step strategy:
+///
+/// 1. If `force_protocol` is set, validate it exists in `protocols` and use it.
+/// 2. Otherwise, if the client's `detected_format` matches a protocol in `protocols`,
+///    use it (passthrough, no conversion).
+/// 3. Otherwise, fall back to the first protocol in `protocols`.
+///
+/// # Errors
+///
+/// Returns `ProxyError::Internal` if `force_protocol` is set but not found in
+/// `protocols`, if the matched protocol string is unrecognized, or if
+/// `protocols` is empty.
+fn resolve_target_protocol(
+    force_protocol: Option<&str>,
+    detected_format: Option<ApiFormat>,
+    protocols: &[ProtocolEntry],
+) -> Result<ApiFormat, ProxyError> {
+    // Step 1: force_protocol must exist in protocols
+    if let Some(fp) = force_protocol {
+        let target = parse_protocol(fp)?;
+        let target_str = protocol_to_str(target);
+        if !protocols.iter().any(|p| p.protocol == target_str) {
+            return Err(ProxyError::Internal(anyhow::anyhow!(
+                "force_protocol '{fp}' not found in channel protocols"
+            )));
+        }
+        return Ok(target);
+    }
+
+    // Step 2: if client protocol is supported, passthrough
+    if let Some(df) = detected_format {
+        let df_str = protocol_to_str(df);
+        if !df_str.is_empty() && protocols.iter().any(|p| p.protocol == df_str) {
+            return Ok(df);
+        }
+    }
+
+    // Step 3: fallback to first protocol
+    if let Some(first) = protocols.first()
+        && !first.protocol.is_empty()
+    {
+        return parse_protocol(&first.protocol);
+    }
+
+    Err(ProxyError::Internal(anyhow::anyhow!(
+        "channel has no protocols configured"
+    )))
+}
 
 /// Resolves the upstream URL for a given protocol from the channel's `protocols` entries.
 ///
@@ -562,7 +711,6 @@ mod tests {
     fn make_channel(
         id: &str,
         name: &str,
-        protocol: ApiFormat,
         protocols: Vec<ProtocolEntry>,
         mappings: Vec<ResolvedMapping>,
     ) -> ResolvedChannel {
@@ -570,10 +718,10 @@ mod tests {
             channel_id: id.into(),
             channel_name: name.into(),
             api_key: secrecy::SecretString::from("sk-test"),
-            protocol,
             protocols,
             enabled: true,
             force_protocol: None,
+            priority: 0,
             mappings,
         }
     }
@@ -592,6 +740,7 @@ mod tests {
                 quota: Some(Quota::Unlimited),
                 on_exhausted: exhausted,
             },
+            allowed_protocols: Vec::new(),
         }
     }
 
@@ -618,6 +767,7 @@ mod tests {
                     currency: "USD".to_string(),
                 },
             },
+            allowed_protocols: Vec::new(),
         }
     }
 
@@ -626,6 +776,7 @@ mod tests {
             channels,
             health: Arc::new(DashMap::new()),
             quota_usage: Arc::new(DashMap::new()),
+            channel_api_keys: Arc::new(DashMap::new()),
         }
     }
 
@@ -637,7 +788,6 @@ mod tests {
             make_channel(
                 "sub",
                 "Subscription",
-                ApiFormat::AnthropicMessages,
                 make_protocols(ApiFormat::AnthropicMessages, "https://sub.example.com"),
                 vec![make_mapping_flatfee(
                     "claude-sonnet",
@@ -648,7 +798,6 @@ mod tests {
             make_channel(
                 "metered",
                 "Metered",
-                ApiFormat::AnthropicMessages,
                 make_protocols(ApiFormat::AnthropicMessages, "https://metered.example.com"),
                 vec![make_mapping_metered("claude-sonnet", "claude-opus-4-7")],
             ),
@@ -666,7 +815,6 @@ mod tests {
             make_channel(
                 "sub-exhausted",
                 "Subscription",
-                ApiFormat::AnthropicMessages,
                 make_protocols(ApiFormat::AnthropicMessages, "https://sub.example.com"),
                 vec![ResolvedMapping {
                     mapping_id: "flatfee-exhausted".into(),
@@ -677,12 +825,12 @@ mod tests {
                         quota: Some(Quota::MaxRequests { per_month: 0 }),
                         on_exhausted: ExhaustedAction::FallbackToMetered,
                     },
+                    allowed_protocols: Vec::new(),
                 }],
             ),
             make_channel(
                 "metered",
                 "Metered",
-                ApiFormat::AnthropicMessages,
                 make_protocols(ApiFormat::AnthropicMessages, "https://metered.example.com"),
                 vec![make_mapping_metered("claude-sonnet", "claude-opus-4-7")],
             ),
@@ -698,7 +846,6 @@ mod tests {
         let mw = make_middleware(vec![make_channel(
             "sub-blocked",
             "Subscription",
-            ApiFormat::AnthropicMessages,
             make_protocols(ApiFormat::AnthropicMessages, "https://sub.example.com"),
             vec![ResolvedMapping {
                 mapping_id: "flatfee-blocked".into(),
@@ -709,6 +856,7 @@ mod tests {
                     quota: Some(Quota::MaxRequests { per_month: 0 }),
                     on_exhausted: ExhaustedAction::Block,
                 },
+                allowed_protocols: Vec::new(),
             }],
         )]);
 
@@ -723,14 +871,12 @@ mod tests {
             make_channel(
                 "m1",
                 "Metered1",
-                ApiFormat::AnthropicMessages,
                 make_protocols(ApiFormat::AnthropicMessages, "https://m1.example.com"),
                 vec![make_mapping_metered("claude-sonnet", "claude-opus-4-7")],
             ),
             make_channel(
                 "m2",
                 "Metered2",
-                ApiFormat::AnthropicMessages,
                 make_protocols(ApiFormat::AnthropicMessages, "https://m2.example.com"),
                 vec![make_mapping_metered("claude-sonnet", "claude-haiku-4-5")],
             ),
@@ -749,7 +895,6 @@ mod tests {
         let mw = make_middleware(vec![make_channel(
             "m1",
             "Metered1",
-            ApiFormat::AnthropicMessages,
             make_protocols(ApiFormat::AnthropicMessages, "https://m1.example.com"),
             vec![make_mapping_metered("claude-sonnet", "claude-opus-4-7")],
         )]);
@@ -766,16 +911,17 @@ mod tests {
                 channel_id: "disabled".into(),
                 channel_name: "Disabled".into(),
                 api_key: secrecy::SecretString::from("sk-test"),
-                protocol: ApiFormat::AnthropicMessages,
                 protocols: make_protocols(
                     ApiFormat::AnthropicMessages,
                     "https://disabled.example.com",
                 ),
                 enabled: false,
                 force_protocol: None,
+                priority: 0,
                 mappings: vec![make_mapping_metered("claude-sonnet", "claude-opus-4-7")],
             }],
             health: Arc::new(DashMap::new()),
+            channel_api_keys: Arc::new(DashMap::new()),
         };
 
         let candidates = mw.find_candidates("claude-sonnet");
@@ -829,6 +975,84 @@ mod tests {
             rewrite_path: None,
         }];
         let result = resolve_upstream_url(ApiFormat::OpenaiChat, &protocols);
+        assert!(result.is_err());
+    }
+
+    // ── resolve_target_protocol ─────────────────────────────────
+
+    fn make_protocol_entries(entries: &[(&str, &str)]) -> Vec<ProtocolEntry> {
+        entries
+            .iter()
+            .map(|&(protocol, base_url)| ProtocolEntry {
+                protocol: protocol.to_owned(),
+                base_url: base_url.to_owned(),
+                rewrite_path: None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn test_resolve_target_protocol_force_valid() {
+        let protocols = make_protocol_entries(&[
+            ("openai_chat", "https://api.example.com"),
+            ("anthropic_messages", "https://api.example.com/anthropic"),
+        ]);
+        let result = resolve_target_protocol(
+            Some("openai_chat"),
+            Some(ApiFormat::AnthropicMessages),
+            &protocols,
+        )
+        .unwrap();
+        assert_eq!(result, ApiFormat::OpenaiChat);
+    }
+
+    #[test]
+    fn test_resolve_target_protocol_force_not_in_protocols() {
+        let protocols = make_protocol_entries(&[("openai_chat", "https://api.example.com")]);
+        let result = resolve_target_protocol(Some("anthropic_messages"), None, &protocols);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_resolve_target_protocol_passthrough_client_match() {
+        let protocols = make_protocol_entries(&[
+            ("openai_chat", "https://api.example.com"),
+            ("anthropic_messages", "https://api.example.com/anthropic"),
+        ]);
+        let result =
+            resolve_target_protocol(None, Some(ApiFormat::AnthropicMessages), &protocols).unwrap();
+        assert_eq!(result, ApiFormat::AnthropicMessages);
+    }
+
+    #[test]
+    fn test_resolve_target_protocol_fallback_to_first() {
+        let protocols = make_protocol_entries(&[
+            ("openai_chat", "https://api.example.com"),
+            ("anthropic_messages", "https://api.example.com/anthropic"),
+        ]);
+        // Client sends a protocol not in the list → fallback to first
+        let result =
+            resolve_target_protocol(None, Some(ApiFormat::OpenaiResponses), &protocols).unwrap();
+        assert_eq!(result, ApiFormat::OpenaiChat);
+    }
+
+    #[test]
+    fn test_resolve_target_protocol_no_client_format() {
+        let protocols = make_protocol_entries(&[("openai_chat", "https://api.example.com")]);
+        // No detected_format → fallback to first
+        let result = resolve_target_protocol(None, None, &protocols).unwrap();
+        assert_eq!(result, ApiFormat::OpenaiChat);
+    }
+
+    #[test]
+    fn test_resolve_target_protocol_empty_protocols() {
+        let result = resolve_target_protocol(None, Some(ApiFormat::AnthropicMessages), &[]);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_resolve_target_protocol_force_with_empty_protocols() {
+        let result = resolve_target_protocol(Some("anthropic_messages"), None, &[]);
         assert!(result.is_err());
     }
 

@@ -7,7 +7,7 @@ PROJECT_DIR="$(dirname "$SCRIPT_DIR")"
 # ── Config ──────────────────────────────────────────────────────────
 PROXY_KEY="${AGENT_PROXY_API_KEY:-sk-1da66127fb094262b2d9f96cede6d05a}"
 ADMIN_KEY="${AGENT_PROXY_ADMIN_KEY:-admin-dev-key}"
-DB_DIR="${HOME}/.tokenfleet-ai"
+DB_DIR="${HOME}/.tokenfleet-ai/token-fleet-switch"
 DB_PATH="${DB_DIR}/agent-proxy.db"
 LISTEN="${AGENT_PROXY_LISTEN:-127.0.0.1:11837}"
 

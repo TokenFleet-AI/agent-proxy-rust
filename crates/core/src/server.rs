@@ -584,8 +584,12 @@ async fn forward_to_upstream(
 ) -> Result<reqwest::Response, ProxyError> {
     let api_key_str = channel.api_key.expose_secret().to_owned();
 
-    // Use rewrite_path if set, otherwise use the original request path
-    let path = channel.rewrite_path.as_deref().unwrap_or(&proxy_req.path);
+    // Use rewrite_path if set and non-empty, otherwise use the original request path
+    let path = channel
+        .rewrite_path
+        .as_deref()
+        .filter(|p| !p.is_empty())
+        .unwrap_or(&proxy_req.path);
     let url = format!("{}{}", channel.url.trim_end_matches('/'), path);
 
     let mut req_builder = client

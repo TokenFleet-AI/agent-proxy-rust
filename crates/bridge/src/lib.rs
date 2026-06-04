@@ -21,7 +21,7 @@ use agent_proxy_rust_core::{
 };
 use async_trait::async_trait;
 use http::{HeaderMap, HeaderName, HeaderValue};
-use llm_bridge_core::model::{TransformError, TransformRequest, TransformResponse};
+use llm_bridge_core::model::{StreamState, TransformError, TransformRequest, TransformResponse};
 use tracing::debug;
 
 // ---------------------------------------------------------------------------
@@ -80,6 +80,54 @@ impl BridgeMiddleware {
     #[must_use]
     pub fn new() -> Self {
         Self
+    }
+
+    /// Converts a buffered SSE streaming response body between protocols.
+    ///
+    /// Since `handle_streaming_response` already buffers the entire SSE body,
+    /// we pass it to the llm-bridge-core batch SSE transform functions which
+    /// parse all frames in one pass and produce converted SSE bytes.
+    /// The response body remains SSE after conversion — `is_streaming` stays `true`.
+    fn on_response_streaming(
+        res: &mut ProxyResponse,
+        upstream_format: ApiFormat,
+        client_format: ApiFormat,
+    ) -> Result<(), ProxyError> {
+        let mut state = StreamState::default();
+
+        let output: Vec<u8> = match client_format {
+            ApiFormat::AnthropicMessages => {
+                llm_bridge_core::stream::transform_stream_to_anthropic_sse(
+                    &res.body,
+                    upstream_format,
+                    &mut state,
+                )
+            }
+            ApiFormat::OpenaiChat => llm_bridge_core::stream::transform_stream_to_openai_sse(
+                &res.body,
+                upstream_format,
+                &mut state,
+            ),
+            ApiFormat::OpenaiResponses => {
+                llm_bridge_core::stream::transform_stream_to_openai_responses_sse(
+                    &res.body,
+                    upstream_format,
+                    &mut state,
+                )
+            }
+            _ => {
+                // Future ApiFormat variants — pass through unchanged.
+                // This is safe because new variants added in llm-bridge-core
+                // won't have corresponding SSE transforms yet.
+                return Ok(());
+            }
+        }
+        .map_err(|e| ProxyError::Internal(anyhow::anyhow!("{e}")))?;
+
+        res.body = output.into();
+        // is_streaming remains true — body is still SSE
+
+        Ok(())
     }
 }
 
@@ -152,6 +200,12 @@ impl ProxyMiddleware for BridgeMiddleware {
         if is_upstream_error_body(&res.body) {
             debug!("bridge: upstream error response, skipping conversion");
             return Ok(());
+        }
+
+        // Streaming SSE responses use batch SSE conversion instead of JSON parsing
+        if res.is_streaming {
+            debug!(?client, ?upstream, "bridge: converting streaming response");
+            return Self::on_response_streaming(res, upstream, client);
         }
 
         debug!(
@@ -410,10 +464,31 @@ mod tests {
     use http::{HeaderMap, Method, StatusCode};
 
     use super::*;
+    use std::sync::LazyLock;
 
     // -------------------------------------------------------------------------
     // Test fixtures
     // -------------------------------------------------------------------------
+
+    /// `OpenAI` Chat SSE streaming body simulating a `DeepSeek` response.
+    ///
+    /// Contains: role delta, `reasoning_content` deltas, content deltas, `finish_reason`,
+    /// and usage in the final chunk.
+    static OPENAI_CHAT_SSE_BODY: LazyLock<Vec<u8>> = LazyLock::new(|| {
+        let lines = [
+            r#"data: {"id":"chatcmpl-123","object":"chat.completion.chunk","created":1780572171,"model":"deepseek-v4-pro","choices":[{"index":0,"delta":{"role":"assistant"}}]}"#,
+            r"",
+            r#"data: {"id":"chatcmpl-123","object":"chat.completion.chunk","created":1780572171,"model":"deepseek-v4-pro","choices":[{"index":0,"delta":{"content":"Hello"}}]}"#,
+            r"",
+            r#"data: {"id":"chatcmpl-123","object":"chat.completion.chunk","created":1780572171,"model":"deepseek-v4-pro","choices":[{"index":0,"delta":{"content":"!"}}]}"#,
+            r"",
+            r#"data: {"id":"chatcmpl-123","object":"chat.completion.chunk","created":1780572171,"model":"deepseek-v4-pro","choices":[{"index":0,"delta":{},"finish_reason":"stop"}],"usage":{"prompt_tokens":10,"completion_tokens":2,"total_tokens":12}}"#,
+            r"",
+            r"data: [DONE]",
+            r"",
+        ];
+        lines.join("\n").into_bytes()
+    });
 
     /// A minimal Anthropic Messages request body.
     const ANTHROPIC_BODY: &str = r#"{"model":"claude-sonnet","max_tokens":1024,"messages":[{"role":"user","content":"hello"}]}"#;
@@ -696,6 +771,83 @@ mod tests {
         assert!(
             body.get("id").is_some(),
             "Anthropic response should have 'id'"
+        );
+    }
+
+    // -------------------------------------------------------------------------
+    // Streaming response tests
+    // -------------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn test_on_response_streaming_converts_openai_sse_to_anthropic_sse() {
+        let mw = BridgeMiddleware::new();
+
+        let body_bytes = Bytes::from(OPENAI_CHAT_SSE_BODY.clone());
+        let mut res = ProxyResponse::new(
+            StatusCode::OK,
+            HeaderMap::new(),
+            body_bytes,
+            true, // is_streaming
+        );
+
+        // Simulate ctx state after an Anthropic → OpenAI Chat request
+        let mut ctx = make_ctx(
+            Some(ApiFormat::AnthropicMessages),
+            Some(ApiFormat::OpenaiChat),
+        );
+        ctx.insert(EXT_BRIDGE_REVERSE, true);
+
+        let original_body = res.body.clone();
+        let result = mw.on_response(&mut res, &ctx).await;
+
+        assert!(
+            result.is_ok(),
+            "streaming SSE conversion should succeed, got: {result:?}"
+        );
+
+        // Body must have changed (converted)
+        assert_ne!(res.body, original_body, "SSE body should be converted");
+
+        // is_streaming should remain true
+        assert!(res.is_streaming, "response should still be streaming");
+
+        // Converted body should contain Anthropic SSE event markers
+        let body_text = String::from_utf8_lossy(&res.body);
+        assert!(
+            body_text.contains("event: message_start"),
+            "should contain message_start event, got: {body_text}"
+        );
+        assert!(
+            body_text.contains("event: content_block_delta"),
+            "should contain content_block_delta event, got: {body_text}"
+        );
+        assert!(
+            body_text.contains("event: message_delta"),
+            "should contain message_delta event, got: {body_text}"
+        );
+        assert!(
+            body_text.contains("event: message_stop"),
+            "should contain message_stop event, got: {body_text}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_on_response_streaming_skips_when_no_reverse_needed() {
+        let mw = BridgeMiddleware::new();
+
+        let body_bytes = Bytes::from(OPENAI_CHAT_SSE_BODY.clone());
+        let mut res = ProxyResponse::new(StatusCode::OK, HeaderMap::new(), body_bytes, true);
+
+        // Same protocol both sides → no reverse flag set
+        let ctx = make_ctx(Some(ApiFormat::OpenaiChat), Some(ApiFormat::OpenaiChat));
+
+        let original_body = res.body.clone();
+        mw.on_response(&mut res, &ctx).await.unwrap();
+
+        // Body should be unchanged (passthrough)
+        assert_eq!(
+            res.body, original_body,
+            "SSE body should be unchanged for passthrough"
         );
     }
 

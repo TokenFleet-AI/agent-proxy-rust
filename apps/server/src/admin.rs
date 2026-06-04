@@ -5,10 +5,11 @@
 
 use std::sync::Arc;
 
+use agent_proxy_rust_model_router::ChannelState;
 use agent_proxy_rust_storage::{
     AvailableChannelInfo, Channel, CompressionSavingsReport, CostAggregate, CostFilter,
-    CostGroupBy, CostRecord, Model, ModelMapping, Provider, Storage, StorageError, SwitchLog,
-    TimeRange,
+    CostGroupBy, CostRecord, Model, ModelMapping, ProtocolEntry, Provider, Storage, StorageError,
+    SwitchLog, TimeRange,
 };
 use axum::{
     Json, Router,
@@ -17,6 +18,7 @@ use axum::{
     response::IntoResponse,
     routing::{delete, get, post, put},
 };
+use dashmap::DashMap;
 use serde::{Deserialize, Serialize};
 use tower_http::cors::{Any, CorsLayer};
 
@@ -24,17 +26,34 @@ use tower_http::cors::{Any, CorsLayer};
 #[derive(Clone)]
 pub struct AdminState {
     pub storage: Arc<dyn Storage>,
+    /// In-memory channel health map shared with the model router.
+    /// Updated when the admin API sets a channel's API key or manually
+    /// marks it healthy/unhealthy.
+    pub health_map: Arc<DashMap<String, ChannelState>>,
+    /// In-memory API key overrides shared with the model router.
+    /// Updated when the admin API sets a channel's API key so the router
+    /// picks up the new key without a restart.
+    pub api_key_map: Arc<DashMap<String, secrecy::SecretString>>,
 }
 
 /// Builds the admin API router with auth middleware.
 ///
 /// If `admin_key` is `Some`, all `/admin/*` routes are protected by
 /// the `x-admin-key` header check.
-pub fn admin_routes(storage: Arc<dyn Storage>, admin_key: Option<String>) -> Router {
+pub fn admin_routes(
+    storage: Arc<dyn Storage>,
+    admin_key: Option<String>,
+    health_map: Arc<DashMap<String, ChannelState>>,
+    api_key_map: Arc<DashMap<String, secrecy::SecretString>>,
+) -> Router {
     use crate::admin_auth::{AdminAuthLayer, admin_auth_middleware};
     use axum::middleware;
 
-    let state = AdminState { storage };
+    let state = AdminState {
+        storage,
+        health_map,
+        api_key_map,
+    };
     let mut router = Router::new()
         // Providers
         .route("/admin/providers", get(list_providers))
@@ -50,6 +69,7 @@ pub fn admin_routes(storage: Arc<dyn Storage>, admin_key: Option<String>) -> Rou
         .route("/admin/channels/{id}/healthy", post(mark_channel_healthy))
         .route("/admin/channels/{id}/failure", post(record_channel_failure))
         .route("/admin/channels/{id}/api-key", put(set_channel_api_key))
+        .route("/admin/channels/{id}/protocols", get(get_channel_protocols))
         // Cost
         .route("/admin/cost-records", get(query_cost_records))
         .route("/admin/cost-records/report", get(cost_report))
@@ -234,6 +254,42 @@ async fn update_channel(
     Path(id): Path<String>,
     Json(body): Json<UpdateChannelBody>,
 ) -> ApiResult<Channel> {
+    // Validate force_protocol against channel's protocols
+    if let Some(ref fp) = body.force_protocol {
+        // Determine which protocols to validate against:
+        // use the new protocols if also being updated, otherwise fetch current
+        let protocols_json = if let Some(ref new_protocols) = body.protocols {
+            new_protocols.clone()
+        } else {
+            let current = state
+                .storage
+                .get_channel(&id)
+                .await
+                .map_err(AppError::from)?
+                .ok_or_else(|| AppError {
+                    status: StatusCode::NOT_FOUND,
+                    message: format!("channel not found: {id}"),
+                })?;
+            current.protocols
+        };
+
+        let entries: Vec<ProtocolEntry> =
+            serde_json::from_str(&protocols_json).map_err(|e| AppError {
+                status: StatusCode::BAD_REQUEST,
+                message: format!("invalid protocols JSON: {e}"),
+            })?;
+
+        if !entries.iter().any(|e| e.protocol == *fp) {
+            let supported: Vec<&str> = entries.iter().map(|e| e.protocol.as_str()).collect();
+            return Err(AppError {
+                status: StatusCode::BAD_REQUEST,
+                message: format!(
+                    "force_protocol '{fp}' not found in channel protocols. Supported: {supported:?}"
+                ),
+            });
+        }
+    }
+
     let updated = state
         .storage
         .update_channel(
@@ -273,6 +329,42 @@ async fn delete_channel(
             _ => AppError::from(e),
         })?;
     Ok(Json(serde_json::json!({"deleted": true})))
+}
+
+/// Response for `GET /admin/channels/{id}/protocols`.
+#[derive(Debug, Serialize)]
+struct ChannelProtocolsResponse {
+    channel_id: String,
+    channel_name: String,
+    /// The parsed list of protocol entries supported by this channel.
+    protocols: Vec<ProtocolEntry>,
+}
+
+async fn get_channel_protocols(
+    State(state): State<AdminState>,
+    Path(id): Path<String>,
+) -> ApiResult<ChannelProtocolsResponse> {
+    let channel = state
+        .storage
+        .get_channel(&id)
+        .await
+        .map_err(AppError::from)?
+        .ok_or_else(|| AppError {
+            status: StatusCode::NOT_FOUND,
+            message: format!("channel not found: {id}"),
+        })?;
+
+    let protocols: Vec<ProtocolEntry> =
+        serde_json::from_str(&channel.protocols).map_err(|e| AppError {
+            status: StatusCode::INTERNAL_SERVER_ERROR,
+            message: format!("failed to parse protocols JSON: {e}"),
+        })?;
+
+    Ok(Json(ChannelProtocolsResponse {
+        channel_id: channel.id,
+        channel_name: channel.name,
+        protocols,
+    }))
 }
 
 async fn mark_channel_healthy(
@@ -316,9 +408,27 @@ async fn set_channel_api_key(
 ) -> ApiResult<serde_json::Value> {
     let key_str = body["apiKey"].as_str().unwrap_or("");
     let secret = secrecy::SecretString::new(key_str.to_string().into_boxed_str());
+
+    // Persist to DB
     state.storage.set_channel_api_key(&id, &secret).await?;
-    // Also mark healthy since user just provided a valid key
     state.storage.mark_channel_healthy(&id).await?;
+
+    // Update in-memory shared maps so the router picks up the new key
+    // and health status without a restart.
+    if key_str.is_empty() {
+        state.api_key_map.remove(&id);
+        // Mark unhealthy in memory: no key → can't authenticate
+        state
+            .health_map
+            .entry(id.clone())
+            .or_default()
+            .mark_unhealthy();
+    } else {
+        state.api_key_map.insert(id.clone(), secret);
+        // Mark healthy in memory: user just provided a valid key
+        state.health_map.remove(&id);
+    }
+
     Ok(Json(serde_json::json!({"status": "ok"})))
 }
 
@@ -387,6 +497,9 @@ async fn update_model_mapping(
     }
     if let Some(v) = body.get("enabled").and_then(serde_json::Value::as_bool) {
         updated.enabled = v;
+    }
+    if let Some(v) = body.get("protocols").and_then(serde_json::Value::as_str) {
+        updated.protocols = v.to_string();
     }
 
     state.storage.upsert_mapping(&updated).await?;
@@ -557,8 +670,15 @@ mod tests {
     async fn test_app() -> Router {
         let storage = SqliteStorage::new_in_memory().unwrap();
         storage.migrate().await.unwrap();
+        let health = Arc::new(DashMap::new());
+        let keys = Arc::new(DashMap::new());
         // Use a known test key so auth passes
-        admin_routes(Arc::new(storage), Some("test-admin-key".into()))
+        admin_routes(
+            Arc::new(storage),
+            Some("test-admin-key".into()),
+            health,
+            keys,
+        )
     }
 
     fn make_authed_request(method: Method, uri: &str) -> Request<Body> {
@@ -574,7 +694,12 @@ mod tests {
     async fn test_unauthorized_without_admin_key() {
         let storage = SqliteStorage::new_in_memory().unwrap();
         storage.migrate().await.unwrap();
-        let app = admin_routes(Arc::new(storage), Some("secret".into()));
+        let app = admin_routes(
+            Arc::new(storage),
+            Some("secret".into()),
+            Arc::new(DashMap::new()),
+            Arc::new(DashMap::new()),
+        );
         let resp = app
             .oneshot(
                 Request::builder()
@@ -592,7 +717,12 @@ mod tests {
     async fn test_unauthorized_with_wrong_key() {
         let storage = SqliteStorage::new_in_memory().unwrap();
         storage.migrate().await.unwrap();
-        let app = admin_routes(Arc::new(storage), Some("correct".into()));
+        let app = admin_routes(
+            Arc::new(storage),
+            Some("correct".into()),
+            Arc::new(DashMap::new()),
+            Arc::new(DashMap::new()),
+        );
         let resp = app
             .oneshot(
                 Request::builder()
@@ -619,7 +749,7 @@ mod tests {
             .await
             .unwrap();
         let providers: Vec<Value> = serde_json::from_slice(&body).unwrap();
-        assert_eq!(providers.len(), 5);
+        assert_eq!(providers.len(), 8);
     }
 
     #[tokio::test]
@@ -634,7 +764,7 @@ mod tests {
             .await
             .unwrap();
         let channels: Vec<Value> = serde_json::from_slice(&body).unwrap();
-        assert_eq!(channels.len(), 7);
+        assert_eq!(channels.len(), 9);
     }
 
     #[tokio::test]

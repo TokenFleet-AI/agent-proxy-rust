@@ -19,6 +19,8 @@
 | 0015 | [health-state-machine](0015-health-state-machine.md) | full | — | in-progress | Channel health: Degraded/Cooldown state machine, failure counting |
 | 0016 | [admin-api-extension](0016-admin-api-extension.md) | full | — | done | Admin API: channels, providers, models, mappings CRUD |
 | 0017 | [stats-reporting](0017-stats-reporting.md) | — | cloud extension | draft | 请求完成后回传消耗/压缩统计到 tokenless |
+| 0018 | [tiered-pricing](0018-tiered-pricing.md) | — | — | draft | 梯度定价 + 多维度计价（Token/时长/图片） |
+| 0019 | [remote-seed-data](0019-remote-seed-data.md) | — | — | draft | 远程 Seed Data 更新：Git Tag 版本化 JSON + 嵌入式回退 + 热更新 |
 
 ## Phase Strategy
 

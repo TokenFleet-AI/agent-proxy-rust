@@ -23,7 +23,7 @@ async fn test_list_providers_after_migration() {
         .list_providers()
         .await
         .expect("list_providers failed");
-    assert_eq!(providers.len(), 5, "should have 7 seed providers");
+    assert_eq!(providers.len(), 8, "should have 8 seed providers");
     let deepseek = providers.iter().find(|p| p.name == "DeepSeek").unwrap();
     assert_eq!(deepseek.id, "deepseek");
 }
@@ -96,7 +96,7 @@ async fn test_list_channels_all() {
         .list_channels(None)
         .await
         .expect("list_channels failed");
-    assert_eq!(channels.len(), 7, "should have 7 seed channels");
+    assert_eq!(channels.len(), 9, "should have 9 seed channels");
 }
 
 #[tokio::test]
@@ -315,5 +315,5 @@ async fn test_migrate_is_idempotent() {
     let storage = setup().await;
     storage.migrate().await.expect("second migrate failed");
     let channels = storage.list_channels(None).await.unwrap();
-    assert_eq!(channels.len(), 7, "seed data must not be duplicated");
+    assert_eq!(channels.len(), 9, "seed data must not be duplicated");
 }

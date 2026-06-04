@@ -24,7 +24,9 @@ use agent_proxy_rust_core::{
     extensions::{EXT_COMPRESSION_STATS, EXT_SELECTED_MAPPING},
     types::{ApiFormat, ConnectionContext},
 };
-use agent_proxy_rust_model_router::{Pricing, SelectedMappingInfo};
+use agent_proxy_rust_model_router::{
+    BillingDimension, Pricing, PricingTier, SelectedMappingInfo, TierPrice,
+};
 use agent_proxy_rust_storage::{CostFilter, CostRecord, Storage, TimeRange};
 use chrono::Utc;
 
@@ -409,21 +411,15 @@ pub fn calc_cost(usage: &Usage, pricing: &Pricing) -> (f64, String) {
             cache_read_per_mtok,
             thinking_per_mtok,
             currency,
-        } => {
-            let input_cost = usage.input_tokens as f64 / 1_000_000.0 * input_per_mtok;
-            let output_cost = usage.output_tokens as f64 / 1_000_000.0 * output_per_mtok;
-            let cache_write_cost =
-                usage.cache_write_tokens as f64 / 1_000_000.0 * cache_write_per_mtok.unwrap_or(0.0);
-            let cache_read_cost =
-                usage.cache_read_tokens as f64 / 1_000_000.0 * cache_read_per_mtok.unwrap_or(0.0);
-            let thinking_cost =
-                usage.thinking_tokens as f64 / 1_000_000.0 * thinking_per_mtok.unwrap_or(0.0);
-            let unit = currency.clone();
-            (
-                input_cost + output_cost + cache_write_cost + cache_read_cost + thinking_cost,
-                unit,
-            )
-        }
+        } => calc_per_token(
+            usage,
+            *input_per_mtok,
+            *output_per_mtok,
+            *cache_write_per_mtok,
+            *cache_read_per_mtok,
+            *thinking_per_mtok,
+            currency,
+        ),
         Pricing::Credits {
             credits_per_mtok_input,
             credits_per_mtok_output,
@@ -440,7 +436,6 @@ pub fn calc_cost(usage: &Usage, pricing: &Pricing) -> (f64, String) {
             price_per_million_chars,
             output_multiplier,
         } => {
-            // Fall back to token-based estimate: 1 token ≈ 0.75 chars (English avg)
             let input_chars = usage.input_tokens as f64 * 0.75;
             let output_chars = usage.output_tokens as f64 * 0.75 * output_multiplier.unwrap_or(1.0);
             (
@@ -448,6 +443,75 @@ pub fn calc_cost(usage: &Usage, pricing: &Pricing) -> (f64, String) {
                 "CNY".to_string(),
             )
         }
+        Pricing::PerUnit {
+            per_unit, currency, ..
+        } => (*per_unit, currency.clone()),
+        Pricing::Tiered {
+            dimension: BillingDimension::Tokens,
+            tiers,
+            currency,
+        } => calc_tiered_tokens(usage, tiers, currency),
+        Pricing::Tiered { currency, .. } => (0.0, currency.clone()),
+    }
+}
+
+/// Calculates per-token cost.
+fn calc_per_token(
+    usage: &Usage,
+    input_per_mtok: f64,
+    output_per_mtok: f64,
+    cache_write_per_mtok: Option<f64>,
+    cache_read_per_mtok: Option<f64>,
+    thinking_per_mtok: Option<f64>,
+    currency: &str,
+) -> (f64, String) {
+    let input_cost = usage.input_tokens as f64 / 1_000_000.0 * input_per_mtok;
+    let output_cost = usage.output_tokens as f64 / 1_000_000.0 * output_per_mtok;
+    let cache_write_cost =
+        usage.cache_write_tokens as f64 / 1_000_000.0 * cache_write_per_mtok.unwrap_or(0.0);
+    let cache_read_cost =
+        usage.cache_read_tokens as f64 / 1_000_000.0 * cache_read_per_mtok.unwrap_or(0.0);
+    let thinking_cost =
+        usage.thinking_tokens as f64 / 1_000_000.0 * thinking_per_mtok.unwrap_or(0.0);
+    (
+        input_cost + output_cost + cache_write_cost + cache_read_cost + thinking_cost,
+        currency.to_string(),
+    )
+}
+
+/// Calculates cost using a tiered token pricing schedule.
+///
+/// Selects the first tier whose `up_to` bound covers the total token count.
+fn calc_tiered_tokens(usage: &Usage, tiers: &[PricingTier], currency: &str) -> (f64, String) {
+    let total_tokens = usage.input_tokens
+        + usage.output_tokens
+        + usage.cache_write_tokens
+        + usage.cache_read_tokens
+        + usage.thinking_tokens;
+    let tier = tiers.iter().find(|t| match t.up_to {
+        None => true,
+        Some(limit) => total_tokens <= limit,
+    });
+    match tier.and_then(|t| match &t.price {
+        TierPrice::Token {
+            input_per_mtok,
+            output_per_mtok,
+            cache_write_per_mtok,
+            cache_read_per_mtok,
+            thinking_per_mtok,
+        } => Some(calc_per_token(
+            usage,
+            *input_per_mtok,
+            *output_per_mtok,
+            *cache_write_per_mtok,
+            *cache_read_per_mtok,
+            *thinking_per_mtok,
+            currency,
+        )),
+        TierPrice::Unit { .. } => None,
+    }) {
+        Some(result) => result,
+        None => (0.0, currency.to_string()),
     }
 }
 
@@ -641,6 +705,98 @@ data: {"type":"response.completed","response":{"usage":{"input_tokens":1200,"out
         let (cost, unit) = calc_subscription_cost();
         assert!((cost - 0.0).abs() < f64::EPSILON);
         assert_eq!(unit, "USD");
+    }
+
+    #[test]
+    fn test_calc_cost_per_unit() {
+        let usage = Usage::default();
+        let pricing = Pricing::PerUnit {
+            metric: BillingDimension::Duration {
+                resolution: Some("1080p".into()),
+            },
+            per_unit: 0.50,
+            currency: "USD".into(),
+        };
+        let (cost, unit) = calc_cost(&usage, &pricing);
+        assert_eq!(unit, "USD");
+        assert!((cost - 0.50).abs() < 0.001);
+    }
+
+    #[test]
+    fn test_calc_cost_tiered_tokens_first_tier() {
+        let usage = Usage {
+            input_tokens: 1_000_000,
+            output_tokens: 500_000,
+            ..Default::default()
+        };
+        let pricing = Pricing::Tiered {
+            dimension: BillingDimension::Tokens,
+            currency: "CNY".into(),
+            tiers: vec![
+                PricingTier {
+                    up_to: Some(1_000_000_000),
+                    price: TierPrice::Token {
+                        input_per_mtok: 1.0,
+                        output_per_mtok: 2.0,
+                        cache_write_per_mtok: None,
+                        cache_read_per_mtok: Some(0.02),
+                        thinking_per_mtok: None,
+                    },
+                },
+                PricingTier {
+                    up_to: Some(5_000_000_000),
+                    price: TierPrice::Token {
+                        input_per_mtok: 0.8,
+                        output_per_mtok: 1.6,
+                        cache_write_per_mtok: None,
+                        cache_read_per_mtok: Some(0.015),
+                        thinking_per_mtok: None,
+                    },
+                },
+                PricingTier {
+                    up_to: None,
+                    price: TierPrice::Token {
+                        input_per_mtok: 0.5,
+                        output_per_mtok: 1.0,
+                        cache_write_per_mtok: None,
+                        cache_read_per_mtok: Some(0.01),
+                        thinking_per_mtok: None,
+                    },
+                },
+            ],
+        };
+        let (cost, unit) = calc_cost(&usage, &pricing);
+        assert_eq!(unit, "CNY");
+        // 1M input * 1.0 + 0.5M output * 2.0 = 1.0 + 1.0 = 2.0
+        assert!((cost - 2.0).abs() < 0.001);
+    }
+
+    #[test]
+    fn test_calc_cost_tiered_tokens_with_cache_read() {
+        let usage = Usage {
+            input_tokens: 1_000_000,
+            output_tokens: 500_000,
+            cache_read_tokens: 2_000_000,
+            ..Default::default()
+        };
+        let pricing = Pricing::Tiered {
+            dimension: BillingDimension::Tokens,
+            currency: "USD".into(),
+            tiers: vec![PricingTier {
+                up_to: None,
+                price: TierPrice::Token {
+                    input_per_mtok: 3.0,
+                    output_per_mtok: 15.0,
+                    cache_write_per_mtok: None,
+                    cache_read_per_mtok: Some(0.3),
+                    thinking_per_mtok: None,
+                },
+            }],
+        };
+        let (cost, unit) = calc_cost(&usage, &pricing);
+        assert_eq!(unit, "USD");
+        // 1M * 3.0 + 0.5M * 15.0 + 2M * 0.3 = 3.0 + 7.5 + 0.6 = 11.1
+        assert!((cost - 11.1).abs() < 0.001);
     }
 
     // ── Parameterized pricing ───────────────────────────────────

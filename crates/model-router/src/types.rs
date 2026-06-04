@@ -52,6 +52,86 @@ pub enum Pricing {
         #[serde(default)]
         output_multiplier: Option<f64>,
     },
+    /// Flat per-unit pricing without tiers (video duration, image count, etc.).
+    PerUnit {
+        /// What is being metered.
+        metric: BillingDimension,
+        /// Price per unit (e.g. per second, per image).
+        per_unit: f64,
+        /// Currency.
+        #[serde(default = "default_currency")]
+        currency: String,
+    },
+    /// Tiered/gradient pricing — rates change based on cumulative usage volume.
+    Tiered {
+        /// What dimension is being metered.
+        dimension: BillingDimension,
+        /// Tiers ordered from lowest to highest range. The first tier whose
+        /// `up_to` covers the cumulative usage is selected.
+        tiers: Vec<PricingTier>,
+        /// Currency.
+        #[serde(default = "default_currency")]
+        currency: String,
+    },
+}
+
+/// The billing dimension for metered and tiered pricing.
+///
+/// Carries optional parameters relevant to that dimension (e.g. video
+/// resolution, image quality).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum BillingDimension {
+    /// Token-based billing (LLM text APIs).
+    Tokens,
+    /// Duration-based billing (video/audio APIs).
+    Duration {
+        /// Optional resolution e.g. `"720p"`, `"1080p"`.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        resolution: Option<String>,
+    },
+    /// Image-count-based billing (image generation APIs).
+    Images {
+        /// Optional quality e.g. `"standard"`, `"hd"`.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        quality: Option<String>,
+    },
+}
+
+/// Per-unit price within a tier, discriminated by dimension type.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum TierPrice {
+    /// Token-based pricing fields.
+    Token {
+        /// Price per million input tokens.
+        input_per_mtok: f64,
+        /// Price per million output tokens.
+        output_per_mtok: f64,
+        /// Price per million cache write tokens.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        cache_write_per_mtok: Option<f64>,
+        /// Price per million cache read tokens.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        cache_read_per_mtok: Option<f64>,
+        /// Price per million thinking tokens.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        thinking_per_mtok: Option<f64>,
+    },
+    /// Generic per-unit pricing (for duration/image tiers).
+    Unit {
+        /// Price per unit (second, image, etc.).
+        per_unit: f64,
+    },
+}
+
+/// A single tier in a [`Pricing::Tiered`] schedule.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct PricingTier {
+    /// Upper bound of this tier (inclusive). `None` means unlimited.
+    pub up_to: Option<u64>,
+    /// Per-unit price for this tier.
+    pub price: TierPrice,
 }
 
 /// Default currency for `Pricing::PerToken`.
@@ -488,5 +568,99 @@ mod tests {
         let json = r#"{"type":"char_based","price_per_million_chars":2.0}"#;
         let pricing: Pricing = serde_json::from_str(json).unwrap();
         assert!(matches!(pricing, Pricing::CharBased { .. }));
+    }
+
+    #[test]
+    fn test_pricing_serde_per_unit() {
+        let json = r#"{"type":"per_unit","metric":{"type":"duration","resolution":"1080p"},"per_unit":0.5,"currency":"USD"}"#;
+        let pricing: Pricing = serde_json::from_str(json).unwrap();
+        match pricing {
+            Pricing::PerUnit {
+                metric,
+                per_unit,
+                currency,
+            } => {
+                assert!((per_unit - 0.5).abs() < f64::EPSILON);
+                assert_eq!(currency, "USD");
+                assert_eq!(
+                    metric,
+                    BillingDimension::Duration {
+                        resolution: Some("1080p".into())
+                    }
+                );
+            }
+            _ => panic!("expected PerUnit"),
+        }
+    }
+
+    #[test]
+    fn test_pricing_serde_tiered_tokens() {
+        let json = r#"{"type":"tiered","dimension":{"type":"tokens"},"currency":"CNY","tiers":[{"up_to":1000000000,"price":{"type":"token","input_per_mtok":1.0,"output_per_mtok":2.0}},{"up_to":null,"price":{"type":"token","input_per_mtok":0.5,"output_per_mtok":1.0}}]}"#;
+        let pricing: Pricing = serde_json::from_str(json).unwrap();
+        match pricing {
+            Pricing::Tiered {
+                dimension,
+                tiers,
+                currency,
+            } => {
+                assert_eq!(dimension, BillingDimension::Tokens);
+                assert_eq!(currency, "CNY");
+                assert_eq!(tiers.len(), 2);
+                assert_eq!(tiers[0].up_to, Some(1_000_000_000));
+                assert!(matches!(tiers[0].price, TierPrice::Token { .. }));
+                assert_eq!(tiers[1].up_to, None);
+            }
+            _ => panic!("expected Tiered"),
+        }
+    }
+
+    #[test]
+    fn test_billing_dimension_serde_tokens() {
+        let json = r#"{"type":"tokens"}"#;
+        let dim: BillingDimension = serde_json::from_str(json).unwrap();
+        assert_eq!(dim, BillingDimension::Tokens);
+    }
+
+    #[test]
+    fn test_billing_dimension_serde_images_with_quality() {
+        let json = r#"{"type":"images","quality":"hd"}"#;
+        let dim: BillingDimension = serde_json::from_str(json).unwrap();
+        assert_eq!(
+            dim,
+            BillingDimension::Images {
+                quality: Some("hd".into())
+            }
+        );
+    }
+
+    #[test]
+    fn test_tier_price_serde_token() {
+        let json = r#"{"type":"token","input_per_mtok":3.0,"output_per_mtok":15.0,"cache_read_per_mtok":0.3}"#;
+        let price: TierPrice = serde_json::from_str(json).unwrap();
+        match price {
+            TierPrice::Token {
+                input_per_mtok,
+                output_per_mtok,
+                cache_read_per_mtok,
+                ..
+            } => {
+                assert!((input_per_mtok - 3.0).abs() < f64::EPSILON);
+                assert!((output_per_mtok - 15.0).abs() < f64::EPSILON);
+                assert_eq!(cache_read_per_mtok, Some(0.3));
+            }
+            TierPrice::Unit { .. } => panic!("expected Token, got Unit"),
+        }
+    }
+
+    #[test]
+    fn test_tier_price_serde_unit() {
+        let json = r#"{"type":"unit","per_unit":0.04}"#;
+        let price: TierPrice = serde_json::from_str(json).unwrap();
+        match price {
+            TierPrice::Unit { per_unit } => {
+                assert!((per_unit - 0.04).abs() < f64::EPSILON);
+            }
+            TierPrice::Token { .. } => panic!("expected Unit, got Token"),
+        }
     }
 }
