@@ -106,16 +106,20 @@ impl CostMiddleware {
             None => (0.0, "USD".to_string()),
         };
 
-        // Compression stats from all layers
-        let schema_saved = stats.map_or(
-            0,
-            agent_proxy_rust_core::CompressionStats::proxy_schema_saved,
-        );
-        let response_saved = stats.map_or(
-            0,
-            agent_proxy_rust_core::CompressionStats::proxy_response_saved,
-        );
-        let rtk_saved = stats.map_or(0, |s| s.rtk_saved);
+        // Compression stats from all layers:
+        // - proxy layer: schema/response compression from CompressMiddleware
+        // - tokenless layer: rtk/response/schema from hook reports
+        let schema_saved = ctx.tokenless_schema_saved
+            + stats.map_or(
+                0,
+                agent_proxy_rust_core::CompressionStats::proxy_schema_saved,
+            );
+        let response_saved = ctx.tokenless_response_saved
+            + stats.map_or(
+                0,
+                agent_proxy_rust_core::CompressionStats::proxy_response_saved,
+            );
+        let rtk_saved = ctx.tokenless_rtk_saved + stats.map_or(0, |s| s.rtk_saved);
         let tokenless_saved =
             stats.map_or(0, agent_proxy_rust_core::CompressionStats::tokenless_saved);
         let experimental_saved = stats.map_or(0, |s| s.tokenless_experimental);

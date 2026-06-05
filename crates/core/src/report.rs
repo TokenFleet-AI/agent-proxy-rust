@@ -116,6 +116,12 @@ struct ProxyReport {
 pub(crate) struct TokenlessAccumulator {
     /// Total tokens saved by all tokenless hook operations.
     pub total_saved: u64,
+    /// Tokens saved by RTK rewrite-command operations.
+    pub rtk_saved: u64,
+    /// Tokens saved by compress-response operations.
+    pub response_saved: u64,
+    /// Tokens saved by compress-schema operations (tokenless layer).
+    pub schema_saved: u64,
     /// Raw breakdown as a JSON array of objects.
     pub breakdown_json: String,
     /// Project path extracted from the first report line that has one.
@@ -208,6 +214,12 @@ pub(crate) fn consume_report(session_id: &str) -> Option<TokenlessAccumulator> {
         // Only accumulate savings from new lines.
         if is_new {
             acc.total_saved += report.saved_tokens;
+            match report.op_type.as_str() {
+                "rewrite-command" => acc.rtk_saved += report.saved_tokens,
+                "compress-response" => acc.response_saved += report.saved_tokens,
+                "compress-schema" => acc.schema_saved += report.saved_tokens,
+                _ => {}
+            }
             has_new_lines = true;
 
             breakdown_items.push(serde_json::json!({
@@ -320,6 +332,12 @@ mod tests {
             }
             if is_new {
                 acc.total_saved += report.saved_tokens;
+                match report.op_type.as_str() {
+                    "rewrite-command" => acc.rtk_saved += report.saved_tokens,
+                    "compress-response" => acc.response_saved += report.saved_tokens,
+                    "compress-schema" => acc.schema_saved += report.saved_tokens,
+                    _ => {}
+                }
                 has_new_lines = true;
                 items.push(serde_json::json!({
                     "op": report.op_type,
@@ -351,9 +369,31 @@ mod tests {
         let mut cursor = 0u64;
         let acc = parse(jsonl, &mut cursor).unwrap();
         assert_eq!(acc.total_saved, 50);
+        assert_eq!(acc.rtk_saved, 50);
+        assert_eq!(acc.response_saved, 0);
+        assert_eq!(acc.schema_saved, 0);
         assert_eq!(acc.project_path.as_deref(), Some("test-proj"));
         assert_eq!(acc.user_name.as_deref(), Some("byx"));
         assert!(cursor > 0);
+    }
+
+    #[test]
+    fn test_per_category_splitting() {
+        let lines = [
+            r#"{"sessionId":"s","agentId":"a","projectPath":"p","userName":"u","opType":"rewrite-command","method":"Rtk","beforeTokens":100,"afterTokens":50,"savedTokens":30,"beforeBytes":100,"afterBytes":50,"savedBytes":50}"#,
+            r#"{"sessionId":"s","agentId":"a","opType":"rewrite-command","method":"Rtk","beforeTokens":50,"afterTokens":20,"savedTokens":25,"beforeBytes":200,"afterBytes":80,"savedBytes":120}"#,
+            r#"{"sessionId":"s","agentId":"a","opType":"compress-response","method":"Standard","beforeTokens":500,"afterTokens":300,"savedTokens":200,"beforeBytes":2000,"afterBytes":1200,"savedBytes":800}"#,
+            r#"{"sessionId":"s","agentId":"a","opType":"compress-schema","method":"ToonHrv","beforeTokens":1000,"afterTokens":700,"savedTokens":300,"beforeBytes":4000,"afterBytes":2800,"savedBytes":1200}"#,
+        ];
+        let content = lines.join("\n");
+        let mut cursor = 0u64;
+        let acc = parse(&content, &mut cursor).unwrap();
+        assert_eq!(acc.total_saved, 30 + 25 + 200 + 300);
+        assert_eq!(acc.rtk_saved, 30 + 25);
+        assert_eq!(acc.response_saved, 200);
+        assert_eq!(acc.schema_saved, 300);
+        assert_eq!(acc.project_path.as_deref(), Some("p"));
+        assert_eq!(acc.user_name.as_deref(), Some("u"));
     }
 
     #[test]

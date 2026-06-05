@@ -210,6 +210,12 @@ pub struct ConnectionContext {
     pub user_name: Option<String>,
     /// Accumulated tokens saved by tokenless hooks (from report file).
     pub tokenless_saved_tokens: u64,
+    /// RTK rewrite-command savings extracted from tokenless report.
+    pub tokenless_rtk_saved: u64,
+    /// Response compression savings extracted from tokenless report.
+    pub tokenless_response_saved: u64,
+    /// Schema compression savings extracted from tokenless report.
+    pub tokenless_schema_saved: u64,
     /// Raw breakdown from tokenless reports, stored as JSON for `CostRecord`.
     pub tokenless_breakdown_json: Option<String>,
 }
@@ -235,6 +241,9 @@ impl ConnectionContext {
             project_path: None,
             user_name: None,
             tokenless_saved_tokens: 0,
+            tokenless_rtk_saved: 0,
+            tokenless_response_saved: 0,
+            tokenless_schema_saved: 0,
             tokenless_breakdown_json: None,
         }
     }

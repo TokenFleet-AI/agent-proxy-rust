@@ -381,6 +381,9 @@ async fn handle_proxy_request(
 
         if let Some(acc) = crate::report::consume_report(sid) {
             ctx.tokenless_saved_tokens = acc.total_saved;
+            ctx.tokenless_rtk_saved = acc.rtk_saved;
+            ctx.tokenless_response_saved = acc.response_saved;
+            ctx.tokenless_schema_saved = acc.schema_saved;
             ctx.tokenless_breakdown_json = Some(acc.breakdown_json);
             // Fallback: extract project_path from report if no header
             if project_path.is_none() {
