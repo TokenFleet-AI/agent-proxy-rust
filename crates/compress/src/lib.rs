@@ -32,6 +32,8 @@ pub struct CompressMiddleware {
     response_compressor: ResponseCompressor,
     /// Response stats collected during `on_response` (ctx is immutable there).
     response_stats: Mutex<Option<ResponseStats>>,
+    /// When `false`, both `on_request` and `on_response` are no-ops.
+    enabled: bool,
 }
 
 /// Token counts collected during response compression.
@@ -51,7 +53,7 @@ impl Default for CompressMiddleware {
 }
 
 impl CompressMiddleware {
-    /// Creates a new [`CompressMiddleware`] with default compression settings.
+    /// Creates a new [`CompressMiddleware`] with compression enabled.
     #[must_use]
     pub fn new() -> Self {
         Self {
@@ -64,7 +66,25 @@ impl CompressMiddleware {
                 .with_max_enum_items(100),
             response_compressor: ResponseCompressor::new(),
             response_stats: Mutex::new(None),
+            enabled: true,
         }
+    }
+
+    /// Creates a new [`CompressMiddleware`] with compression **disabled**.
+    ///
+    /// When disabled, both `on_request` and `on_response` are no-ops.
+    /// Use [`CompressMiddleware::set_enabled`] to toggle at runtime.
+    #[must_use]
+    pub fn disabled() -> Self {
+        Self {
+            enabled: false,
+            ..Self::new()
+        }
+    }
+
+    /// Enables or disables compression at runtime.
+    pub fn set_enabled(&mut self, enabled: bool) {
+        self.enabled = enabled;
     }
 
     /// Takes the response compression stats collected during the last
@@ -82,6 +102,9 @@ impl ProxyMiddleware for CompressMiddleware {
         req: &mut ProxyRequest,
         ctx: &mut ConnectionContext,
     ) -> Result<(), ProxyError> {
+        if !self.enabled {
+            return Ok(());
+        }
         let mut body: serde_json::Value = serde_json::from_slice(&req.body)
             .map_err(|e| ProxyError::BadRequest(format!("invalid JSON: {e}")))?;
 
@@ -155,6 +178,10 @@ impl ProxyMiddleware for CompressMiddleware {
         res: &mut ProxyResponse,
         _ctx: &ConnectionContext,
     ) -> Result<(), ProxyError> {
+        if !self.enabled {
+            return Ok(());
+        }
+
         // Skip streaming responses
         if res.is_streaming {
             return Ok(());
