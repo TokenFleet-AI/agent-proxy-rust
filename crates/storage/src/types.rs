@@ -353,6 +353,71 @@ pub struct AvailableModelInfo {
     pub upstream_name: String,
 }
 
+// ── Seed Data ────────────────────────────────────────────────────────
+
+/// Status of the local seed data.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SeedStatus {
+    /// Current local version.
+    pub local_version: u32,
+    /// Latest remote version (if checked).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub remote_version: Option<u32>,
+    /// Whether a newer remote version is available.
+    pub update_available: bool,
+    /// Data source: `"embedded"`, `"remote"`, or `"cache"`.
+    pub source: String,
+    /// Per-entry status detail.
+    pub entries: Vec<SeedEntryStatus>,
+    /// When the last refresh was attempted (RFC 3339).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub last_refresh_at: Option<String>,
+    /// Last error message, if any.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub last_error: Option<String>,
+}
+
+/// Status of a single seed data entry.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SeedEntryStatus {
+    /// Entry name (e.g. `"providers"`, `"models"`).
+    pub name: String,
+    /// Local SHA-256 hash.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub local_sha256: Option<String>,
+    /// Remote SHA-256 hash (if checked).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub remote_sha256: Option<String>,
+    /// Whether local and remote differ.
+    pub changed: bool,
+}
+
+/// Deserialized seed manifest from `seed-manifest.json`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SeedManifest {
+    /// Manifest version (monotonically increasing).
+    pub version: u32,
+    /// Minimum schema version required.
+    pub min_schema_version: u32,
+    /// When this manifest was published (RFC 3339).
+    pub updated_at: String,
+    /// File entries with SHA-256 checksums.
+    pub entries: std::collections::HashMap<String, SeedManifestEntry>,
+}
+
+/// A single file entry in the seed manifest.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SeedManifestEntry {
+    /// File name (e.g. `"providers.json"`).
+    pub file: String,
+    /// SHA-256 hex digest of the file contents.
+    pub sha256: String,
+}
+
 // ── Serde helpers for SecretString ────────────────────────────────
 
 /// A single protocol entry in a channel's `protocols` JSON.

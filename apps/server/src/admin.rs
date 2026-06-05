@@ -8,8 +8,8 @@ use std::sync::Arc;
 use agent_proxy_rust_model_router::ChannelState;
 use agent_proxy_rust_storage::{
     AvailableChannelInfo, Channel, CompressionSavingsReport, CostAggregate, CostFilter,
-    CostGroupBy, CostRecord, Model, ModelMapping, ProtocolEntry, Provider, Storage, StorageError,
-    SwitchLog, TimeRange,
+    CostGroupBy, CostRecord, Model, ModelMapping, ProtocolEntry, Provider, SeedManager, SeedStatus,
+    Storage, StorageError, SwitchLog, TimeRange,
 };
 use axum::{
     Json, Router,
@@ -34,6 +34,8 @@ pub struct AdminState {
     /// Updated when the admin API sets a channel's API key so the router
     /// picks up the new key without a restart.
     pub api_key_map: Arc<DashMap<String, secrecy::SecretString>>,
+    /// Seed data manager for remote updates.
+    pub seed: Arc<dyn SeedManager>,
 }
 
 /// Builds the admin API router with auth middleware.
@@ -42,6 +44,7 @@ pub struct AdminState {
 /// the `x-admin-key` header check.
 pub fn admin_routes(
     storage: Arc<dyn Storage>,
+    seed: Arc<dyn SeedManager>,
     admin_key: Option<String>,
     health_map: Arc<DashMap<String, ChannelState>>,
     api_key_map: Arc<DashMap<String, secrecy::SecretString>>,
@@ -53,6 +56,7 @@ pub fn admin_routes(
         storage,
         health_map,
         api_key_map,
+        seed,
     };
     let mut router = Router::new()
         // Providers
@@ -89,6 +93,9 @@ pub fn admin_routes(
         .route("/admin/switch-logs", get(query_switch_logs_handler))
         // Health
         .route("/admin/health", get(admin_health))
+        // Seed Data
+        .route("/admin/seed/status", get(seed_status_handler))
+        .route("/admin/seed/refresh", post(seed_refresh_handler))
         .layer(
             CorsLayer::new()
                 .allow_origin(Any)
@@ -448,6 +455,75 @@ async fn admin_health(State(state): State<AdminState>) -> ApiResult<serde_json::
     Ok(Json(serde_json::json!({"healthy": healthy})))
 }
 
+// ── Seed Data ────────────────────────────────────────────────────────────────
+
+/// Query params for seed status.
+#[derive(Debug, Deserialize)]
+struct SeedStatusQuery {
+    #[serde(default)]
+    remote: bool,
+}
+
+/// `GET /admin/seed/status`
+///
+/// Returns local seed data status. Use `?remote=true` to also check the
+/// remote manifest for updates (does not apply changes).
+async fn seed_status_handler(
+    State(state): State<AdminState>,
+    Query(query): Query<SeedStatusQuery>,
+) -> ApiResult<SeedStatus> {
+    if query.remote {
+        let status = state.seed.seed_check_remote(None).await?;
+        Ok(Json(status))
+    } else {
+        let status = state.seed.seed_status().await?;
+        Ok(Json(status))
+    }
+}
+
+/// Request body for `POST /admin/seed/refresh`.
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct SeedRefreshBody {
+    url: Option<String>,
+}
+
+/// Response for `POST /admin/seed/refresh`.
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct SeedRefreshResponse {
+    success: bool,
+    previous_version: u32,
+    new_version: u32,
+    source: String,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    errors: Vec<String>,
+}
+
+/// `POST /admin/seed/refresh`
+///
+/// Triggers a remote seed data refresh. Optionally accepts `{"url":"..."}`
+/// to override the remote URL.
+async fn seed_refresh_handler(
+    State(state): State<AdminState>,
+    Json(body): Json<SeedRefreshBody>,
+) -> ApiResult<SeedRefreshResponse> {
+    let previous = state.seed.seed_status().await?;
+    let previous_version = previous.local_version;
+
+    let status = state.seed.seed_refresh(body.url.as_deref()).await?;
+
+    let response = SeedRefreshResponse {
+        success: status.last_error.is_none(),
+        previous_version,
+        new_version: status.local_version,
+        source: status.source,
+        errors: status.last_error.into_iter().collect(),
+    };
+
+    Ok(Json(response))
+}
+
 // ── Model Mappings CRUD ────────────────────────────────────────────────────
 
 /// Create a new model mapping.
@@ -657,6 +733,7 @@ async fn cost_trend(
 #[cfg(test)]
 mod tests {
     #![allow(clippy::expect_used, clippy::unwrap_used)]
+    use agent_proxy_rust_storage::SeedManager;
     use agent_proxy_rust_storage_sqlite::SqliteStorage;
     use axum::{
         body::Body,
@@ -670,11 +747,14 @@ mod tests {
     async fn test_app() -> Router {
         let storage = SqliteStorage::new_in_memory().unwrap();
         storage.migrate().await.unwrap();
+        storage.seed_init().await.unwrap();
         let health = Arc::new(DashMap::new());
         let keys = Arc::new(DashMap::new());
+        let seed: Arc<dyn SeedManager> = Arc::new(storage.clone());
         // Use a known test key so auth passes
         admin_routes(
             Arc::new(storage),
+            seed,
             Some("test-admin-key".into()),
             health,
             keys,
@@ -694,8 +774,10 @@ mod tests {
     async fn test_unauthorized_without_admin_key() {
         let storage = SqliteStorage::new_in_memory().unwrap();
         storage.migrate().await.unwrap();
+        let seed: Arc<dyn SeedManager> = Arc::new(storage.clone());
         let app = admin_routes(
             Arc::new(storage),
+            seed,
             Some("secret".into()),
             Arc::new(DashMap::new()),
             Arc::new(DashMap::new()),
@@ -717,8 +799,10 @@ mod tests {
     async fn test_unauthorized_with_wrong_key() {
         let storage = SqliteStorage::new_in_memory().unwrap();
         storage.migrate().await.unwrap();
+        let seed: Arc<dyn SeedManager> = Arc::new(storage.clone());
         let app = admin_routes(
             Arc::new(storage),
+            seed,
             Some("correct".into()),
             Arc::new(DashMap::new()),
             Arc::new(DashMap::new()),

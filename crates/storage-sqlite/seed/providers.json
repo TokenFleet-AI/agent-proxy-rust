@@ -1,0 +1,10 @@
+[
+  {"id": "anthropic",        "name": "Anthropic",            "created_at": 0},
+  {"id": "google",           "name": "Google (Gemini)",      "created_at": 0},
+  {"id": "openai",           "name": "OpenAI",               "created_at": 0},
+  {"id": "deepseek",         "name": "DeepSeek",             "created_at": 0},
+  {"id": "alibaba-bailian",  "name": "Alibaba Bailian",      "created_at": 0},
+  {"id": "moonshot",         "name": "Moonshot (Kimi)",      "created_at": 0},
+  {"id": "zhipu",            "name": "Zhipu AI",             "created_at": 0},
+  {"id": "minimax",          "name": "MiniMax",              "created_at": 0}
+]

@@ -10,8 +10,8 @@ use std::fmt::Write;
 
 use agent_proxy_rust_storage::{
     AvailableChannelInfo, AvailableModelInfo, Channel, CostAggregate, CostFilter, CostGroupBy,
-    CostRecord, Model, ModelMapping, Provider, Storage, StorageError, SubscriptionFee, SwitchLog,
-    TimeRange,
+    CostRecord, Model, ModelMapping, Provider, SeedManager, SeedStatus, Storage, StorageError,
+    SubscriptionFee, SwitchLog, TimeRange,
 };
 use async_trait::async_trait;
 use r2d2::Pool;
@@ -19,6 +19,8 @@ use r2d2_sqlite::SqliteConnectionManager;
 use rusqlite::params;
 use secrecy::{ExposeSecret, SecretString};
 use tracing::debug;
+
+mod seed;
 
 const MIGRATION_V1: &str = include_str!("../migrations/001_init.sql");
 
@@ -1404,6 +1406,41 @@ impl Storage for SqliteStorage {
     }
 }
 
+// ── SeedManager impl ──────────────────────────────────────────────────
+
+#[async_trait]
+impl SeedManager for SqliteStorage {
+    async fn seed_init(&self) -> Result<SeedStatus, StorageError> {
+        let ops = seed::SeedOps::new(self.get_pool());
+        tokio::task::spawn_blocking(move || ops.seed_init())
+            .await
+            .map_err(|e| StorageError::Backend(format!("join error: {e}")))?
+    }
+
+    async fn seed_refresh(&self, url: Option<&str>) -> Result<SeedStatus, StorageError> {
+        let url = url.map(String::from);
+        let ops = seed::SeedOps::new(self.get_pool());
+        tokio::task::spawn_blocking(move || ops.seed_refresh(url.as_deref()))
+            .await
+            .map_err(|e| StorageError::Backend(format!("join error: {e}")))?
+    }
+
+    async fn seed_status(&self) -> Result<SeedStatus, StorageError> {
+        let ops = seed::SeedOps::new(self.get_pool());
+        tokio::task::spawn_blocking(move || ops.seed_status())
+            .await
+            .map_err(|e| StorageError::Backend(format!("join error: {e}")))?
+    }
+
+    async fn seed_check_remote(&self, url: Option<&str>) -> Result<SeedStatus, StorageError> {
+        let url = url.map(String::from);
+        let ops = seed::SeedOps::new(self.get_pool());
+        tokio::task::spawn_blocking(move || ops.seed_check_remote(url.as_deref()))
+            .await
+            .map_err(|e| StorageError::Backend(format!("join error: {e}")))?
+    }
+}
+
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 mod tests {
@@ -1412,10 +1449,9 @@ mod tests {
     /// Sync setup for non-async tests.
     fn setup_in_memory() -> SqliteStorage {
         let storage = SqliteStorage::new_in_memory().expect("failed to create in-memory storage");
-        tokio::runtime::Runtime::new()
-            .unwrap()
-            .block_on(storage.migrate())
-            .expect("migration failed");
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        rt.block_on(storage.migrate()).expect("migration failed");
+        rt.block_on(storage.seed_init()).expect("seed init failed");
         storage
     }
 
@@ -1423,6 +1459,7 @@ mod tests {
     async fn setup_in_memory_async() -> SqliteStorage {
         let storage = SqliteStorage::new_in_memory().expect("failed to create in-memory storage");
         storage.migrate().await.expect("migration failed");
+        storage.seed_init().await.expect("seed init failed");
         storage
     }
 

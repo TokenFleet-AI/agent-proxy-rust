@@ -1,0 +1,17 @@
+[
+  {"id": "deepseek:deepseek-v4-flash",        "provider_id": "deepseek",        "client_name": "deepseek-v4-flash",  "price_input": 1.0,  "price_output": 2.0,  "currency": "CNY", "context_window": 1000000, "created_at": 0},
+  {"id": "deepseek:deepseek-v4-pro",          "provider_id": "deepseek",        "client_name": "deepseek-v4-pro",    "price_input": 3.0,  "price_output": 6.0,  "currency": "CNY", "context_window": 1000000, "created_at": 0},
+  {"id": "alibaba-bailian:qwen3.7-max",       "provider_id": "alibaba-bailian", "client_name": "qwen3.7-max",        "price_input": 6.0,  "price_output": 18.0, "currency": "CNY", "context_window": 256000,  "created_at": 0},
+  {"id": "alibaba-bailian:qwen3.6-max",       "provider_id": "alibaba-bailian", "client_name": "qwen3.6-max",        "price_input": 9.0,  "price_output": 54.0, "currency": "CNY", "context_window": 256000,  "created_at": 0},
+  {"id": "alibaba-bailian:qwen3.6-plus",      "provider_id": "alibaba-bailian", "client_name": "qwen3.6-plus",       "price_input": 2.0,  "price_output": 12.0, "currency": "CNY", "context_window": 1000000, "created_at": 0},
+  {"id": "alibaba-bailian:qwen3.6-flash",     "provider_id": "alibaba-bailian", "client_name": "qwen3.6-flash",      "price_input": 1.20, "price_output": 7.20, "currency": "CNY", "context_window": 1000000, "created_at": 0},
+  {"id": "alibaba-bailian:qwen3.5-plus",      "provider_id": "alibaba-bailian", "client_name": "qwen3.5-plus",       "price_input": 0.80, "price_output": 4.80, "currency": "CNY", "context_window": 1000000, "created_at": 0},
+  {"id": "alibaba-bailian:qwen3.5-flash",     "provider_id": "alibaba-bailian", "client_name": "qwen3.5-flash",      "price_input": 0.20, "price_output": 2.0,  "currency": "CNY", "context_window": 1000000, "created_at": 0},
+  {"id": "zhipu:glm-5.1",                     "provider_id": "zhipu",           "client_name": "glm-5.1",            "price_input": 6.0,  "price_output": 24.0, "currency": "CNY", "context_window": 200000,  "created_at": 0},
+  {"id": "zhipu:glm-5-turbo",                 "provider_id": "zhipu",           "client_name": "glm-5-turbo",        "price_input": 5.0,  "price_output": 22.0, "currency": "CNY", "context_window": 200000,  "created_at": 0},
+  {"id": "zhipu:glm-5",                       "provider_id": "zhipu",           "client_name": "glm-5",              "price_input": 4.0,  "price_output": 18.0, "currency": "CNY", "context_window": 200000,  "created_at": 0},
+  {"id": "zhipu:glm-4.7-flash",               "provider_id": "zhipu",           "client_name": "glm-4.7-flash",      "price_input": 0.0,  "price_output": 0.0,  "currency": "CNY", "context_window": 200000,  "created_at": 0},
+  {"id": "moonshot:kimi-k2.6",                "provider_id": "moonshot",        "client_name": "kimi-k2.6",          "price_input": 6.50, "price_output": 27.0, "currency": "CNY", "context_window": 256000,  "created_at": 0},
+  {"id": "moonshot:kimi-k2.5",                "provider_id": "moonshot",        "client_name": "kimi-k2.5",          "price_input": 4.0,  "price_output": 21.0, "currency": "CNY", "context_window": 256000,  "created_at": 0},
+  {"id": "minimax:minimax-m2.7",              "provider_id": "minimax",         "client_name": "minimax-m2.7",       "price_input": 2.10, "price_output": 8.40, "currency": "CNY", "context_window": 256000,  "created_at": 0}
+]

@@ -2,7 +2,9 @@
 
 #![allow(clippy::expect_used, clippy::unwrap_used)]
 
-use agent_proxy_rust_storage::{CostFilter, CostRecord, Storage, SubscriptionFee, SwitchLog};
+use agent_proxy_rust_storage::{
+    CostFilter, CostRecord, SeedManager, Storage, SubscriptionFee, SwitchLog,
+};
 use agent_proxy_rust_storage_sqlite::SqliteStorage;
 use chrono::Utc;
 use serial_test::serial;
@@ -10,6 +12,7 @@ use serial_test::serial;
 async fn setup() -> SqliteStorage {
     let storage = SqliteStorage::new_in_memory().expect("failed to create storage");
     storage.migrate().await.expect("migration failed");
+    storage.seed_init().await.expect("seed init failed");
     storage
 }
 

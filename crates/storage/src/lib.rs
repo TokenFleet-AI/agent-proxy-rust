@@ -18,7 +18,8 @@ use secrecy::SecretString;
 pub use types::{
     AvailableChannelInfo, AvailableModelInfo, Channel, CompressionSavingsReport, CostAggregate,
     CostFilter, CostGroupBy, CostRecord, Model, ModelMapping, ProtocolEntry, Provider,
-    SubscriptionFee, SwitchLog, TimeRange,
+    SeedEntryStatus, SeedManifest, SeedManifestEntry, SeedStatus, SubscriptionFee, SwitchLog,
+    TimeRange,
 };
 
 /// Backend-agnostic storage for providers, models, channels, and cost records.
@@ -156,4 +157,33 @@ pub trait Storage: Send + Sync + Debug {
 
     /// Maximum number of concurrent connections this backend supports.
     fn max_connections(&self) -> usize;
+}
+
+/// Seed data manager — initializes and refreshes reference data.
+///
+/// Seed data includes providers, models, channels, and model mappings
+/// with pricing. It is versioned separately from schema migrations so
+/// it can be hot-updated without redeploying.
+#[async_trait]
+pub trait SeedManager: Send + Sync {
+    /// Initialize seed data from the embedded fallback (compile-time JSON).
+    ///
+    /// Idempotent — safe to call on every startup. Only inserts when the
+    /// local database has no seed data yet (version = 0).
+    async fn seed_init(&self) -> Result<SeedStatus, StorageError>;
+
+    /// Fetch and apply seed data from a remote URL.
+    ///
+    /// `url` is the base URL to the seed directory (e.g.
+    /// `"https://raw.githubusercontent.com/.../refs/tags/seed-v3/crates/storage-sqlite/seed/"`).
+    /// When `None`, tries the environment variable `AGENT_PROXY_SEED_URL`,
+    /// then falls back to the last-used URL stored in `seed_metadata`.
+    async fn seed_refresh(&self, url: Option<&str>) -> Result<SeedStatus, StorageError>;
+
+    /// Query the current seed data status without fetching.
+    async fn seed_status(&self) -> Result<SeedStatus, StorageError>;
+
+    /// Fetch the remote manifest and compare with local status, but do NOT
+    /// apply any changes. Used by the admin API `?remote=true` query parameter.
+    async fn seed_check_remote(&self, url: Option<&str>) -> Result<SeedStatus, StorageError>;
 }

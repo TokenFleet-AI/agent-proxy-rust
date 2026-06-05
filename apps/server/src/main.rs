@@ -10,7 +10,7 @@ use agent_proxy_rust_compress::CompressMiddleware;
 use agent_proxy_rust_core::{AgentProxyBuilder, ProxyConfig};
 use agent_proxy_rust_cost::CostMiddleware;
 use agent_proxy_rust_model_router::ModelRouterMiddleware;
-use agent_proxy_rust_storage::Storage;
+use agent_proxy_rust_storage::{SeedManager, Storage};
 use agent_proxy_rust_storage_sqlite::SqliteStorage;
 use anyhow::Result;
 
@@ -34,8 +34,19 @@ async fn main() -> Result<()> {
 
     let db_storage = SqliteStorage::new(&db_path)?;
     db_storage.migrate().await?;
+    match db_storage.seed_init().await {
+        Ok(status) => tracing::info!(
+            version = status.local_version,
+            source = %status.source,
+            "seed data initialized"
+        ),
+        Err(e) => {
+            tracing::warn!(error = %e, "seed data initialization failed, continuing with DB schema only");
+        }
+    }
 
-    let storage: Arc<dyn Storage> = Arc::new(db_storage);
+    let storage: Arc<dyn Storage> = Arc::new(db_storage.clone());
+    let seed: Arc<dyn SeedManager> = Arc::new(db_storage);
     let model_router = ModelRouterMiddleware::from_storage(storage.clone()).await?;
 
     // Share the in-memory health map and API-key map with the admin API so
@@ -46,6 +57,7 @@ async fn main() -> Result<()> {
     let admin_key = admin_auth::resolve_admin_key();
     let admin = admin::admin_routes(
         storage.clone(),
+        seed,
         Some(admin_key.clone()),
         health_map,
         api_key_map,

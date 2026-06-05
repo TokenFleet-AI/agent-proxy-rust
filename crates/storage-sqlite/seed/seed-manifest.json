@@ -1,0 +1,23 @@
+{
+  "version": 1,
+  "minSchemaVersion": 1,
+  "updatedAt": "2026-06-05T00:00:00Z",
+  "entries": {
+    "providers": {
+      "file": "providers.json",
+      "sha256": "b13bcd261bf493d3c3af4dc1ada2914ca531223a322f03096f34fa6ba23e02ba"
+    },
+    "models": {
+      "file": "models.json",
+      "sha256": "301deb5bcaad499a419998c76e32a1734606c9ce434d63cadcc18dceda357f71"
+    },
+    "channels": {
+      "file": "channels.json",
+      "sha256": "c386c169c82b7b789bc4d79041fae9e512a6b87ce4be3110a0656f00f37e12c6"
+    },
+    "modelMappings": {
+      "file": "model_mappings.json",
+      "sha256": "8040769387141438dc3141dd36e7aa52e41553b3cd3d9c6eb477216bd3e8c689"
+    }
+  }
+}
