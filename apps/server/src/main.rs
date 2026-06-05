@@ -55,12 +55,15 @@ async fn main() -> Result<()> {
     let api_key_map = Arc::clone(model_router.api_key_map());
 
     let admin_key = admin_auth::resolve_admin_key();
+    let compress = CompressMiddleware::new();
+    let compress_enabled = compress.enabled_flag();
     let admin = admin::admin_routes(
         storage.clone(),
         seed,
         Some(admin_key.clone()),
         health_map,
         api_key_map,
+        compress_enabled,
     );
 
     eprintln!("[agent-proxy] Admin key: {admin_key}");
@@ -84,7 +87,7 @@ async fn main() -> Result<()> {
     let proxy = AgentProxyBuilder::default()
         .config(config)
         .cost_recorder(cost_middleware)
-        .middleware(CompressMiddleware::new())
+        .middleware(compress)
         .middleware(model_router)
         .middleware(BridgeMiddleware::new())
         .build()?

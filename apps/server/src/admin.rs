@@ -4,6 +4,7 @@
 //! instead of direct `SQLite` access.
 
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use agent_proxy_rust_model_router::ChannelState;
 use agent_proxy_rust_storage::{
@@ -27,15 +28,13 @@ use tower_http::cors::{Any, CorsLayer};
 pub struct AdminState {
     pub storage: Arc<dyn Storage>,
     /// In-memory channel health map shared with the model router.
-    /// Updated when the admin API sets a channel's API key or manually
-    /// marks it healthy/unhealthy.
     pub health_map: Arc<DashMap<String, ChannelState>>,
     /// In-memory API key overrides shared with the model router.
-    /// Updated when the admin API sets a channel's API key so the router
-    /// picks up the new key without a restart.
     pub api_key_map: Arc<DashMap<String, secrecy::SecretString>>,
     /// Seed data manager for remote updates.
     pub seed: Arc<dyn SeedManager>,
+    /// Shared toggle for `CompressMiddleware` on/off.
+    pub compress_enabled: Arc<AtomicBool>,
 }
 
 /// Builds the admin API router with auth middleware.
@@ -48,6 +47,7 @@ pub fn admin_routes(
     admin_key: Option<String>,
     health_map: Arc<DashMap<String, ChannelState>>,
     api_key_map: Arc<DashMap<String, secrecy::SecretString>>,
+    compress_enabled: Arc<AtomicBool>,
 ) -> Router {
     use crate::admin_auth::{AdminAuthLayer, admin_auth_middleware};
     use axum::middleware;
@@ -57,6 +57,7 @@ pub fn admin_routes(
         health_map,
         api_key_map,
         seed,
+        compress_enabled,
     };
     let mut router = Router::new()
         // Providers
@@ -96,6 +97,9 @@ pub fn admin_routes(
         // Seed Data
         .route("/admin/seed/status", get(seed_status_handler))
         .route("/admin/seed/refresh", post(seed_refresh_handler))
+        // Compress toggle
+        .route("/admin/compress/status", get(compress_status))
+        .route("/admin/compress/toggle", post(compress_toggle))
         .layer(
             CorsLayer::new()
                 .allow_origin(Any)
@@ -730,6 +734,32 @@ async fn cost_trend(
     Ok(Json(filtered))
 }
 
+// ── Compress Toggle ──────────────────────────────────────────────────────────
+
+/// GET /admin/compress/status
+async fn compress_status(State(state): State<AdminState>) -> ApiResult<serde_json::Value> {
+    let enabled = state.compress_enabled.load(Ordering::Relaxed);
+    Ok(Json(serde_json::json!({"enabled": enabled})))
+}
+
+/// POST /admin/compress/toggle
+///
+/// Body: `{"enabled": true}` or `{"enabled": false}`
+async fn compress_toggle(
+    State(state): State<AdminState>,
+    Json(body): Json<serde_json::Value>,
+) -> ApiResult<serde_json::Value> {
+    if let Some(enabled) = body.get("enabled").and_then(serde_json::Value::as_bool) {
+        state.compress_enabled.store(enabled, Ordering::Relaxed);
+        Ok(Json(serde_json::json!({"enabled": enabled})))
+    } else {
+        Err(AppError {
+            status: StatusCode::BAD_REQUEST,
+            message: r#"missing required field: "enabled" (bool)"#.to_string(),
+        })
+    }
+}
+
 #[cfg(test)]
 mod tests {
     #![allow(clippy::expect_used, clippy::unwrap_used)]
@@ -758,6 +788,7 @@ mod tests {
             Some("test-admin-key".into()),
             health,
             keys,
+            Arc::new(AtomicBool::new(true)),
         )
     }
 
@@ -781,6 +812,7 @@ mod tests {
             Some("secret".into()),
             Arc::new(DashMap::new()),
             Arc::new(DashMap::new()),
+            Arc::new(AtomicBool::new(true)),
         );
         let resp = app
             .oneshot(
@@ -806,6 +838,7 @@ mod tests {
             Some("correct".into()),
             Arc::new(DashMap::new()),
             Arc::new(DashMap::new()),
+            Arc::new(AtomicBool::new(true)),
         );
         let resp = app
             .oneshot(

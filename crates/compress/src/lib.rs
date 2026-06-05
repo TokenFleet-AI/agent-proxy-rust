@@ -9,7 +9,8 @@
 mod token_counter;
 
 use std::io::Write;
-use std::sync::Mutex;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
 
 use agent_proxy_rust_core::{
     CompressionStats, ProxyError,
@@ -33,7 +34,7 @@ pub struct CompressMiddleware {
     /// Response stats collected during `on_response` (ctx is immutable there).
     response_stats: Mutex<Option<ResponseStats>>,
     /// When `false`, both `on_request` and `on_response` are no-ops.
-    enabled: bool,
+    enabled: Arc<AtomicBool>,
 }
 
 /// Token counts collected during response compression.
@@ -66,25 +67,35 @@ impl CompressMiddleware {
                 .with_max_enum_items(100),
             response_compressor: ResponseCompressor::new(),
             response_stats: Mutex::new(None),
-            enabled: true,
+            enabled: Arc::new(AtomicBool::new(true)),
         }
     }
 
     /// Creates a new [`CompressMiddleware`] with compression **disabled**.
-    ///
-    /// When disabled, both `on_request` and `on_response` are no-ops.
-    /// Use [`CompressMiddleware::set_enabled`] to toggle at runtime.
     #[must_use]
     pub fn disabled() -> Self {
         Self {
-            enabled: false,
+            enabled: Arc::new(AtomicBool::new(false)),
             ..Self::new()
         }
     }
 
+    /// Returns a shared handle to the enabled flag, allowing external
+    /// callers (e.g. admin API) to toggle compression at runtime.
+    #[must_use]
+    pub fn enabled_flag(&self) -> Arc<AtomicBool> {
+        Arc::clone(&self.enabled)
+    }
+
+    /// Returns `true` if compression is currently enabled.
+    #[must_use]
+    pub fn is_enabled(&self) -> bool {
+        self.enabled.load(Ordering::Relaxed)
+    }
+
     /// Enables or disables compression at runtime.
-    pub fn set_enabled(&mut self, enabled: bool) {
-        self.enabled = enabled;
+    pub fn set_enabled(&self, enabled: bool) {
+        self.enabled.store(enabled, Ordering::Relaxed);
     }
 
     /// Takes the response compression stats collected during the last
@@ -102,7 +113,7 @@ impl ProxyMiddleware for CompressMiddleware {
         req: &mut ProxyRequest,
         ctx: &mut ConnectionContext,
     ) -> Result<(), ProxyError> {
-        if !self.enabled {
+        if !self.is_enabled() {
             return Ok(());
         }
         let mut body: serde_json::Value = serde_json::from_slice(&req.body)
@@ -178,7 +189,7 @@ impl ProxyMiddleware for CompressMiddleware {
         res: &mut ProxyResponse,
         _ctx: &ConnectionContext,
     ) -> Result<(), ProxyError> {
-        if !self.enabled {
+        if !self.is_enabled() {
             return Ok(());
         }
 
