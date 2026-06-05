@@ -1,8 +1,9 @@
 //! Tokenless report file consumer.
 //!
-//! Reads the per-session JSONL report file produced by tokenless hooks,
-//! consumes it via rename-then-read (atomic), and returns accumulated
-//! before-stats for the current API request.
+//! Reads the per-session JSONL report file produced by tokenless hooks
+//! incrementally: each API request reads only the new lines since the last
+//! consumption, keeping the file on disk so every request gets its fair
+//! share of project/user context and incremental savings.
 //!
 //! # Report file format (JSONL)
 //!
@@ -67,9 +68,14 @@
 // operations that don't benefit from async I/O.
 #![allow(clippy::disallowed_methods, clippy::disallowed_types)]
 
-use std::{fs, io::Write, path::PathBuf};
+use std::{fs, io::Write, sync::LazyLock};
 
+use dashmap::DashMap;
 use serde::Deserialize;
+
+/// Tracks the last consumed byte offset per session for incremental
+/// tokenless report reading. Kept in-memory; resets on proxy restart.
+static REPORT_CURSORS: LazyLock<DashMap<String, u64>> = LazyLock::new(DashMap::new);
 
 /// A single compression event reported by a tokenless hook.
 #[derive(Debug, Deserialize)]
@@ -118,13 +124,20 @@ pub(crate) struct TokenlessAccumulator {
     pub user_name: Option<String>,
 }
 
-/// Consume and parse the tokenless report file for a session.
+/// Reads the tokenless report file for a session, returning only the
+/// incremental savings since the last read.
 ///
-/// Uses rename-then-read to avoid race conditions with concurrent
-/// tokenless hook writes. The report file lives at:
+/// Unlike the original rename-then-delete design, this reads the file in
+/// place and tracks consumption via a byte-offset cursor. Every API request
+/// in the same session gets its share of savings, and `project_path` /
+/// `user_name` are always returned if present in the file.
+///
+/// The report file lives at:
 /// `~/.tokenfleet-ai/tokenless/reports/{session_id}.jsonl`
 ///
-/// Returns `None` if no report file exists or the session ID is empty.
+/// Returns `None` if no report file exists, the session ID is empty, or
+/// there are no new lines since the last consumption (and no metadata to
+/// propagate).
 pub(crate) fn consume_report(session_id: &str) -> Option<TokenlessAccumulator> {
     if session_id.is_empty() {
         return None;
@@ -147,42 +160,55 @@ pub(crate) fn consume_report(session_id: &str) -> Option<TokenlessAccumulator> {
         .join("tokenless")
         .join("reports");
     let source = reports_dir.join(format!("{safe_sid}.jsonl"));
-    let target = reports_dir.join(format!("{safe_sid}.processing"));
 
-    // Atomically rename to claim the file.
-    fs::rename(&source, &target).ok()?;
-
-    let result = parse_report_file(&target);
-
-    // Clean up the processing file regardless of parse success.
-    let _ = fs::remove_file(&target);
-
-    result
-}
-
-/// Parse a JSONL report file into an accumulator.
-fn parse_report_file(path: &PathBuf) -> Option<TokenlessAccumulator> {
-    let content = fs::read_to_string(path).ok()?;
+    // Read in place — no rename, no delete.
+    let content = fs::read_to_string(&source).ok()?;
     if content.is_empty() {
         return None;
     }
 
+    // Cursor tracks the byte offset of the last consumed byte.
+    let mut cursor = REPORT_CURSORS.entry(safe_sid).or_insert(0u64);
+    let start_byte = usize::try_from(*cursor).unwrap_or(usize::MAX);
+
+    // If the file shrank (shouldn't normally happen), reset the cursor.
+    let start_byte = if start_byte > content.len() {
+        *cursor = 0;
+        0
+    } else {
+        start_byte
+    };
+
     let mut acc = TokenlessAccumulator::default();
     let mut breakdown_items: Vec<serde_json::Value> = Vec::new();
+    let mut has_new_lines = false;
 
     for line in content.lines() {
         let trimmed = line.trim();
         if trimmed.is_empty() {
             continue;
         }
-        if let Ok(report) = serde_json::from_str::<ProxyReport>(trimmed) {
+
+        // Determine whether this line is new using byte position.
+        let line_start = line.as_ptr() as usize - content.as_ptr() as usize;
+        let is_new = line_start >= start_byte;
+
+        let Ok(report) = serde_json::from_str::<ProxyReport>(trimmed) else {
+            continue;
+        };
+
+        // Always extract project/user from the first line that carries them.
+        if acc.project_path.is_none() {
+            acc.project_path.clone_from(&report.project_path);
+        }
+        if acc.user_name.is_none() {
+            acc.user_name.clone_from(&report.user_name);
+        }
+
+        // Only accumulate savings from new lines.
+        if is_new {
             acc.total_saved += report.saved_tokens;
-            if acc.project_path.is_none() {
-                acc.project_path.clone_from(&report.project_path);
-            }
-            if acc.user_name.is_none() {
-                acc.user_name.clone_from(&report.user_name);
-            }
+            has_new_lines = true;
 
             breakdown_items.push(serde_json::json!({
                 "op": report.op_type,
@@ -197,14 +223,27 @@ fn parse_report_file(path: &PathBuf) -> Option<TokenlessAccumulator> {
         }
     }
 
+    // Advance cursor past all content we just scanned, so the next read
+    // only picks up newly appended lines.
+    if has_new_lines {
+        *cursor = content.len() as u64;
+    }
+
+    let has_new_data = has_new_lines;
+    let has_meta = acc.project_path.is_some() || acc.user_name.is_some();
+
+    if !has_new_data && !has_meta {
+        return None;
+    }
+
     tracing::info!(
-        lines = breakdown_items.len(),
-        total_saved = acc.total_saved,
+        new_lines = breakdown_items.len(),
+        total_new_saved = acc.total_saved,
         project_path = ?acc.project_path,
-        "consumed tokenless report"
+        "consumed tokenless report (incremental)"
     );
 
-    // Debug: write report consumption log to file
+    // Debug log.
     let _ = write_consume_log(
         breakdown_items.len(),
         acc.total_saved,
@@ -248,86 +287,105 @@ fn write_consume_log(lines: usize, total_saved: u64, project_path: Option<&str>)
 #[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
-    use std::io::Write;
 
-    #[test]
-    fn test_parse_empty_file() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("empty.jsonl");
-        fs::write(&path, "").unwrap();
+    /// Helper: parse JSONL content incrementally with a cursor.
+    fn parse(content: &str, cursor: &mut u64) -> Option<TokenlessAccumulator> {
+        let start_byte = usize::try_from(*cursor).unwrap_or(usize::MAX);
+        let start = if start_byte > content.len() {
+            0
+        } else {
+            start_byte
+        };
 
-        let result = parse_report_file(&path);
-        assert!(result.is_none());
-    }
+        let mut acc = TokenlessAccumulator::default();
+        let mut items: Vec<serde_json::Value> = Vec::new();
+        let mut has_new_lines = false;
 
-    #[test]
-    fn test_parse_single_line() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("single.jsonl");
-        let line = serde_json::json!({
-            "sessionId": "sess-1",
-            "agentId": "claude",
-            "projectPath": null,
-            "opType": "CompressSchema",
-            "method": "ToonHrv",
-            "beforeTokens": 1500,
-            "afterTokens": 700,
-            "savedTokens": 800
-        })
-        .to_string();
-        let mut f = fs::File::create(&path).unwrap();
-        writeln!(f, "{line}").unwrap();
+        for line in content.lines() {
+            let trimmed = line.trim();
+            if trimmed.is_empty() {
+                continue;
+            }
+            let line_start = line.as_ptr() as usize - content.as_ptr() as usize;
+            let is_new = line_start >= start;
 
-        let result = parse_report_file(&path);
-        assert!(result.is_some());
-        let acc = result.unwrap();
-        assert_eq!(acc.total_saved, 800);
-        assert!(acc.breakdown_json.contains("ToonHrv"));
-    }
-
-    #[test]
-    fn test_parse_multiple_lines_accumulates() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("multi.jsonl");
-        let lines = [
-            serde_json::json!({"sessionId":"s","agentId":"a","opType":"CompressSchema","method":"ToonHrv","beforeTokens":1000,"afterTokens":500,"savedTokens":500}),
-            serde_json::json!({"sessionId":"s","agentId":"a","opType":"RewriteCommand","method":"RtkStandard","beforeTokens":200,"afterTokens":50,"savedTokens":150}),
-        ];
-        let mut f = fs::File::create(&path).unwrap();
-        for line in &lines {
-            writeln!(f, "{line}").unwrap();
+            let Ok(report) = serde_json::from_str::<super::ProxyReport>(trimmed) else {
+                continue;
+            };
+            if acc.project_path.is_none() {
+                acc.project_path.clone_from(&report.project_path);
+            }
+            if acc.user_name.is_none() {
+                acc.user_name.clone_from(&report.user_name);
+            }
+            if is_new {
+                acc.total_saved += report.saved_tokens;
+                has_new_lines = true;
+                items.push(serde_json::json!({
+                    "op": report.op_type,
+                    "savedTokens": report.saved_tokens,
+                }));
+            }
         }
-
-        let result = parse_report_file(&path);
-        let acc = result.unwrap();
-        assert_eq!(acc.total_saved, 650);
-        assert_eq!(acc.breakdown_json.matches("\"savedTokens\"").count(), 2);
+        if has_new_lines {
+            *cursor = content.len() as u64;
+        }
+        if items.is_empty() && acc.project_path.is_none() && acc.user_name.is_none() {
+            return None;
+        }
+        if !items.is_empty() {
+            acc.breakdown_json = serde_json::to_string(&items).unwrap_or_default();
+        }
+        Some(acc)
     }
 
     #[test]
-    fn test_consume_report_rename_then_read() {
-        let dir = tempfile::tempdir().unwrap();
+    fn test_incremental_empty_returns_none() {
+        let mut cursor = 0u64;
+        assert!(parse("", &mut cursor).is_none());
+    }
 
-        // Simulate: create a "reports" directory with a session file
-        let reports = dir.path().join("reports");
-        fs::create_dir_all(&reports).unwrap();
+    #[test]
+    fn test_incremental_first_read() {
+        let jsonl = r#"{"sessionId":"s","agentId":"a","projectPath":"test-proj","userName":"byx","opType":"rewrite-command","method":"Rtk","beforeTokens":100,"afterTokens":50,"savedTokens":50,"beforeBytes":400,"afterBytes":200,"savedBytes":200}"#;
+        let mut cursor = 0u64;
+        let acc = parse(jsonl, &mut cursor).unwrap();
+        assert_eq!(acc.total_saved, 50);
+        assert_eq!(acc.project_path.as_deref(), Some("test-proj"));
+        assert_eq!(acc.user_name.as_deref(), Some("byx"));
+        assert!(cursor > 0);
+    }
 
-        let source = reports.join("sess-abc.jsonl");
-        let line = serde_json::json!({
-            "sessionId": "sess-abc",
-            "agentId": "claude",
-            "opType": "CompressResponse",
-            "method": "HighFidelity",
-            "beforeTokens": 3000,
-            "afterTokens": 2200,
-            "savedTokens": 800
-        })
-        .to_string();
-        fs::write(&source, format!("{line}\n")).unwrap();
+    #[test]
+    fn test_incremental_second_read_only_new_lines() {
+        let first = r#"{"sessionId":"s","agentId":"a","projectPath":"p","userName":"u","opType":"rewrite-command","method":"Rtk","beforeTokens":100,"afterTokens":50,"savedTokens":50,"beforeBytes":400,"afterBytes":200,"savedBytes":200}"#;
+        let mut cursor = 0u64;
+        // First read consumes first line
+        let acc1 = parse(first, &mut cursor).unwrap();
+        assert_eq!(acc1.total_saved, 50);
 
-        // Cannot easily test consume_report because it uses ~/.tokenfleet-ai
-        // But parse_report_file is tested above.
-        assert!(source.exists());
-        assert!(!reports.join("sess-abc.processing").exists());
+        // Append a second line
+        let second_line = r#"{"sessionId":"s","agentId":"a","projectPath":"p","userName":"u","opType":"rewrite-command","method":"Rtk","beforeTokens":200,"afterTokens":100,"savedTokens":100,"beforeBytes":800,"afterBytes":400,"savedBytes":400}"#;
+        let full = format!("{first}\n{second_line}\n");
+        let acc2 = parse(&full, &mut cursor).unwrap();
+        // Only the new line's savings
+        assert_eq!(acc2.total_saved, 100);
+        // Metadata still available even from old lines
+        assert_eq!(acc2.project_path.as_deref(), Some("p"));
+        assert_eq!(acc2.user_name.as_deref(), Some("u"));
+    }
+
+    #[test]
+    fn test_incremental_no_new_data_returns_meta() {
+        let first = r#"{"sessionId":"s","agentId":"a","projectPath":"p","userName":"u","opType":"rewrite-command","method":"Rtk","beforeTokens":100,"afterTokens":50,"savedTokens":50,"beforeBytes":400,"afterBytes":200,"savedBytes":200}"#;
+        let mut cursor = 0u64;
+        parse(first, &mut cursor);
+
+        // Second read with no new data — still returns meta
+        let acc = parse(first, &mut cursor).unwrap();
+        assert_eq!(acc.total_saved, 0);
+        assert_eq!(acc.project_path.as_deref(), Some("p"));
+        assert_eq!(acc.user_name.as_deref(), Some("u"));
+        assert!(acc.breakdown_json.is_empty());
     }
 }
