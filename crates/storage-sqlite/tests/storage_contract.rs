@@ -207,6 +207,9 @@ async fn test_insert_and_query_cost_records() {
     let record = CostRecord {
         id: uuid::Uuid::now_v7().to_string(),
         channel_id: "deepseek".into(),
+        upstream_channel: "DeepSeek Official".into(),
+        upstream_model: "deepseek-v4-pro".into(),
+        request_time_ms: 0,
         project: "/test/project".into(),
         user_id: "test-user".into(),
         agent_type: "ClaudeCode".into(),

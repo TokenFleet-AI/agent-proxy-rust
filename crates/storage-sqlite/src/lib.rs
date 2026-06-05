@@ -847,6 +847,9 @@ impl Storage for SqliteStorage {
     async fn insert_cost_record(&self, record: &CostRecord) -> Result<(), StorageError> {
         let id = record.id.clone();
         let channel_id = record.channel_id.clone();
+        let upstream_channel = record.upstream_channel.clone();
+        let upstream_model = record.upstream_model.clone();
+        let request_time_ms = record.request_time_ms;
         let project = record.project.clone();
         let user_id = record.user_id.clone();
         let agent_type = record.agent_type.clone();
@@ -878,18 +881,21 @@ impl Storage for SqliteStorage {
                 .map_err(|e| StorageError::Connection(e.to_string()))?;
             conn.execute(
                 "INSERT INTO cost_records
-                 (id, channel_id, project, user_id, agent_type,
+                 (id, channel_id, upstream_channel, upstream_model, request_time_ms, project, user_id, agent_type,
                   input_tokens, output_tokens, cache_write_tokens, cache_read_tokens,
                   thinking_tokens, cost,
                   schema_saved_tokens, response_saved_tokens, rtk_saved_tokens,
                   pre_compress_tokens, post_compress_tokens, compression_tokens_saved,
                   unit, pricing_snapshot_json, timestamp,
                   session_id, before_tokens, after_tokens, tokens_saved, compression_breakdown_json)
-                 VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,?20,
-                         ?21,?22,?23,?24,?25)",
+                 VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,?20,?21,?22,?23,
+                         ?24,?25,?26,?27,?28)",
                 params![
                     id,
                     channel_id,
+                    upstream_channel,
+                    upstream_model,
+                    request_time_ms,
                     project,
                     user_id,
                     agent_type,
@@ -934,7 +940,7 @@ impl Storage for SqliteStorage {
                 .map_err(|e| StorageError::Connection(e.to_string()))?;
 
             let mut sql = String::from(
-                "SELECT id, channel_id, project, user_id, agent_type,
+                "SELECT id, channel_id, upstream_channel, upstream_model, request_time_ms, project, user_id, agent_type,
                         input_tokens, output_tokens, cache_write_tokens, cache_read_tokens,
                         thinking_tokens, cost,
                         schema_saved_tokens, response_saved_tokens, rtk_saved_tokens,
@@ -982,29 +988,32 @@ impl Storage for SqliteStorage {
                     Ok(CostRecord {
                         id: row.get(0)?,
                         channel_id: row.get(1)?,
-                        project: row.get(2)?,
-                        user_id: row.get(3)?,
-                        agent_type: row.get(4)?,
-                        input_tokens: row.get(5)?,
-                        output_tokens: row.get(6)?,
-                        cache_write_tokens: row.get(7)?,
-                        cache_read_tokens: row.get(8)?,
-                        thinking_tokens: row.get(9)?,
-                        cost: row.get(10)?,
-                        schema_saved_tokens: row.get(11)?,
-                        response_saved_tokens: row.get(12)?,
-                        rtk_saved_tokens: row.get(13)?,
-                        pre_compress_tokens: row.get(14)?,
-                        post_compress_tokens: row.get(15)?,
-                        compression_tokens_saved: row.get(16)?,
-                        unit: row.get(17)?,
-                        pricing_snapshot_json: row.get(18)?,
-                        timestamp: row.get(19)?,
-                        session_id: row.get(20)?,
-                        before_tokens: row.get(21)?,
-                        after_tokens: row.get(22)?,
-                        tokens_saved: row.get(23)?,
-                        compression_breakdown_json: row.get(24)?,
+                        upstream_channel: row.get(2)?,
+                        upstream_model: row.get(3)?,
+                        request_time_ms: row.get(4)?,
+                        project: row.get(5)?,
+                        user_id: row.get(6)?,
+                        agent_type: row.get(7)?,
+                        input_tokens: row.get(8)?,
+                        output_tokens: row.get(9)?,
+                        cache_write_tokens: row.get(10)?,
+                        cache_read_tokens: row.get(11)?,
+                        thinking_tokens: row.get(12)?,
+                        cost: row.get(13)?,
+                        schema_saved_tokens: row.get(14)?,
+                        response_saved_tokens: row.get(15)?,
+                        rtk_saved_tokens: row.get(16)?,
+                        pre_compress_tokens: row.get(17)?,
+                        post_compress_tokens: row.get(18)?,
+                        compression_tokens_saved: row.get(19)?,
+                        unit: row.get(20)?,
+                        pricing_snapshot_json: row.get(21)?,
+                        timestamp: row.get(22)?,
+                        session_id: row.get(23)?,
+                        before_tokens: row.get(24)?,
+                        after_tokens: row.get(25)?,
+                        tokens_saved: row.get(26)?,
+                        compression_breakdown_json: row.get(27)?,
                     })
                 })
                 .map_err(|e| StorageError::Backend(e.to_string()))?;

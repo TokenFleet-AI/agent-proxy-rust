@@ -137,8 +137,17 @@ fn is_empty_protocols(s: &str) -> bool {
 pub struct CostRecord {
     /// UUID v7 primary key.
     pub id: String,
-    /// Channel used for this request.
+    /// Channel used for this request (proxy channel ID, e.g. "deepseek").
     pub channel_id: String,
+    /// Human-readable upstream channel name (e.g. "`DeepSeek` Official").
+    #[serde(default)]
+    pub upstream_channel: String,
+    /// Upstream model name sent to the API (e.g. "deepseek-v4-pro").
+    #[serde(default)]
+    pub upstream_model: String,
+    /// Request processing time in milliseconds (from request arrival to response return).
+    #[serde(default)]
+    pub request_time_ms: i64,
     /// Project path or identifier.
     pub project: String,
     /// User who made the request.

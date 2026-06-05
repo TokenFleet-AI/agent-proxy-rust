@@ -698,18 +698,19 @@ fn log_error(err: &ProxyError, ctx: &ConnectionContext) {
 /// in a JSON value suitable for cost recording.
 ///
 /// Parses `data:` lines looking for usage-bearing events:
-/// - **Anthropic**: `message_delta` event with `usage` field
+/// - **Anthropic**: `message_start` + `message_delta` events (merged — see below)
 /// - **`OpenAI` Chat**: last chunk with `usage` field (before `[DONE]`)
 /// - **`OpenAI` Responses**: `response.completed` event with `usage` field
 ///
-/// The last usage event wins, matching the upstream API behavior where
-/// usage is reported at the end of the stream.
+/// For Anthropic streams, `message_start` carries `input_tokens` while
+/// `message_delta` carries `output_tokens` + cache fields. We merge them
+/// instead of overwriting, so both input and output tokens are captured.
 fn extract_usage_from_sse(body: &[u8]) -> serde_json::Value {
     let Ok(text) = std::str::from_utf8(body) else {
         return serde_json::Value::Null;
     };
 
-    let mut last_usage: Option<serde_json::Value> = None;
+    let mut merged: serde_json::Map<String, serde_json::Value> = serde_json::Map::new();
 
     for line in text.lines() {
         let data = line.strip_prefix("data: ").unwrap_or(line);
@@ -720,35 +721,56 @@ fn extract_usage_from_sse(body: &[u8]) -> serde_json::Value {
             continue;
         };
 
-        // Anthropic message_delta
-        if event.get("type").and_then(|v| v.as_str()) == Some("message_delta")
-            && let Some(u) = event.get("usage")
-        {
-            last_usage = Some(u.clone());
-        }
-        // Anthropic message_start (may include usage)
+        // Anthropic message_start — carries input_tokens
         if event.get("type").and_then(|v| v.as_str()) == Some("message_start")
             && let Some(u) = event.get("message").and_then(|m| m.get("usage"))
         {
-            last_usage = Some(u.clone());
+            merge_usage_fields(&mut merged, u);
+        }
+        // Anthropic message_delta — carries output_tokens + cache fields
+        if event.get("type").and_then(|v| v.as_str()) == Some("message_delta")
+            && let Some(u) = event.get("usage")
+        {
+            merge_usage_fields(&mut merged, u);
         }
         // OpenAI Responses completed
         if event.get("type").and_then(|v| v.as_str()) == Some("response.completed")
             && let Some(u) = event.get("response").and_then(|r| r.get("usage"))
         {
-            last_usage = Some(u.clone());
+            merge_usage_fields(&mut merged, u);
         }
         // OpenAI Chat: has "choices" and "usage"
         if event.get("choices").is_some()
             && let Some(u) = event.get("usage")
         {
-            last_usage = Some(u.clone());
+            merge_usage_fields(&mut merged, u);
         }
     }
 
-    match last_usage {
-        Some(usage) => serde_json::json!({"usage": usage}),
-        None => serde_json::Value::Null,
+    if merged.is_empty() {
+        serde_json::Value::Null
+    } else {
+        serde_json::json!({"usage": serde_json::Value::Object(merged)})
+    }
+}
+
+/// Merges usage fields from an SSE event into the accumulator map.
+///
+/// Existing keys are overwritten only when the incoming value is a non-zero
+/// number, so later events (e.g. `message_delta` with `output_tokens`) can
+/// update fields while `message_start`'s `input_tokens` is preserved.
+fn merge_usage_fields(
+    acc: &mut serde_json::Map<String, serde_json::Value>,
+    usage: &serde_json::Value,
+) {
+    if let Some(obj) = usage.as_object() {
+        for (k, v) in obj {
+            let is_nonzero_number =
+                v.as_u64().is_some_and(|n| n > 0) || v.as_f64().is_some_and(|f| f > 0.0);
+            if is_nonzero_number || !acc.contains_key(k) {
+                acc.insert(k.clone(), v.clone());
+            }
+        }
     }
 }
 

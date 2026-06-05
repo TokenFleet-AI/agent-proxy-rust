@@ -15,14 +15,15 @@
 // u64 → f64 conversion is inherent to token cost calculation;
 // 1,000,000 tokens at $3/MTok = $3 — precision loss is negligible.
 // u64 → i64 is safe because token values fit comfortably in i64.
+// request_time_ms uses try_from to avoid u128→i64 truncation.
 #![allow(clippy::cast_precision_loss, clippy::cast_possible_wrap)]
 
 use std::sync::Arc;
 
 use agent_proxy_rust_core::{
     CompressionStats, CostRecorder, ProxyError,
-    extensions::{EXT_COMPRESSION_STATS, EXT_SELECTED_MAPPING},
-    types::{ApiFormat, ConnectionContext},
+    extensions::{EXT_COMPRESSION_STATS, EXT_SELECTED_CHANNEL, EXT_SELECTED_MAPPING},
+    types::{ApiFormat, ChannelConfig, ConnectionContext},
 };
 use agent_proxy_rust_model_router::{
     BillingDimension, Pricing, PricingTier, SelectedMappingInfo, TierPrice,
@@ -84,11 +85,20 @@ impl CostMiddleware {
         response_body: &serde_json::Value,
     ) -> Result<(), ProxyError> {
         let mapping_info = ctx.get::<SelectedMappingInfo>(EXT_SELECTED_MAPPING);
+        let channel_config = ctx.get::<ChannelConfig>(EXT_SELECTED_CHANNEL);
         let stats = ctx.get::<CompressionStats>(EXT_COMPRESSION_STATS);
 
         let channel_id = mapping_info.map_or(String::new(), |m| m.channel_id.clone());
+        // Upstream channel display name (e.g. "DeepSeek Official")
+        let upstream_channel = channel_config.map_or(String::new(), |c| c.name.clone());
+        // Upstream model name sent to the API (e.g. "deepseek-v4-pro")
+        let upstream_model = mapping_info.map_or(String::new(), |m| m.upstream_name.clone());
 
-        let usage = extract_usage(response_body, ctx.target_protocol);
+        // Auto-detect format instead of using ctx.target_protocol:
+        // when bridge middleware converts the response body (e.g. OpenAI→Anthropic),
+        // the usage field names change (prompt_tokens→input_tokens), so target_protocol
+        // no longer matches the actual body format. Auto-detect handles both formats.
+        let usage = extract_usage(response_body, None);
 
         // Compute actual cost from pricing
         let (actual_cost, unit) = match mapping_info.and_then(|m| m.pricing.as_ref()) {
@@ -126,6 +136,10 @@ impl CostMiddleware {
         let record = CostRecord {
             id: uuid::Uuid::now_v7().to_string(),
             channel_id,
+            upstream_channel,
+            upstream_model,
+            request_time_ms: i64::try_from(ctx.started_at.elapsed().as_millis())
+                .unwrap_or(i64::MAX),
             project: ctx.project_path.clone().unwrap_or_default(),
             user_id: ctx
                 .user_name

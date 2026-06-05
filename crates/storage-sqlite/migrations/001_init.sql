@@ -73,6 +73,9 @@ CREATE INDEX IF NOT EXISTS idx_mappings_channel ON model_mappings(channel_id);
 CREATE TABLE IF NOT EXISTS cost_records (
     id TEXT PRIMARY KEY,
     channel_id TEXT NOT NULL DEFAULT '',
+    upstream_channel TEXT NOT NULL DEFAULT '',
+    upstream_model TEXT NOT NULL DEFAULT '',
+    request_time_ms INTEGER NOT NULL DEFAULT 0,
     project TEXT NOT NULL DEFAULT '',
     user_id TEXT NOT NULL DEFAULT '',
     agent_type TEXT NOT NULL DEFAULT '',
