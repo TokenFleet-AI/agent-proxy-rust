@@ -306,7 +306,7 @@ impl Storage for SqliteStorage {
                 ),
                 None => (
                     format!(
-                        "SELECT {} FROM channels ORDER BY CASE health_status WHEN 'Healthy' THEN 0 WHEN 'Degraded' THEN 1 WHEN 'Cooldown' THEN 2 ELSE 3 END, priority, id",
+                        "SELECT {} FROM channels ORDER BY priority, id",
                         SqliteStorage::CHANNEL_COLS
                     ),
                     vec![],
@@ -958,7 +958,7 @@ impl Storage for SqliteStorage {
                 param_values.push(Box::new(project_path));
             }
             if let Some(model_name) = filter.model_name {
-                sql.push_str(" AND channel_id = ?");
+                sql.push_str(" AND upstream_model = ?");
                 param_values.push(Box::new(model_name));
             }
             if let Some(channel_name) = filter.channel_name {
@@ -967,8 +967,14 @@ impl Storage for SqliteStorage {
             }
             if let Some(ref tr) = filter.time_range {
                 sql.push_str(" AND timestamp >= ? AND timestamp < ?");
-                param_values.push(Box::new(tr.start.to_string()));
-                param_values.push(Box::new(tr.end.to_string()));
+                let start_rfc = chrono::DateTime::from_timestamp(tr.start, 0)
+                    .unwrap_or_default()
+                    .to_rfc3339();
+                let end_rfc = chrono::DateTime::from_timestamp(tr.end, 0)
+                    .unwrap_or_default()
+                    .to_rfc3339();
+                param_values.push(Box::new(start_rfc));
+                param_values.push(Box::new(end_rfc));
             }
 
             sql.push_str(" ORDER BY timestamp DESC");
@@ -1036,8 +1042,14 @@ impl Storage for SqliteStorage {
         range: TimeRange,
     ) -> Result<Vec<CostAggregate>, StorageError> {
         let pool = self.get_pool();
-        let start_ts = range.start;
-        let end_ts = range.end;
+        // Convert Unix epoch seconds to RFC 3339 strings for comparison
+        // with the timestamp column (which stores RFC 3339 strings).
+        let start_rfc = chrono::DateTime::from_timestamp(range.start, 0)
+            .unwrap_or_default()
+            .to_rfc3339();
+        let end_rfc = chrono::DateTime::from_timestamp(range.end, 0)
+            .unwrap_or_default()
+            .to_rfc3339();
 
         tokio::task::spawn_blocking(move || {
             let conn = pool
@@ -1048,9 +1060,14 @@ impl Storage for SqliteStorage {
                 CostGroupBy::Project => ("project", "project"),
                 CostGroupBy::Model | CostGroupBy::Channel => ("channel_id", "channel_id"),
                 CostGroupBy::ProjectModelMonth => (
-                    "project || '|' || channel_id || '|' || substr(timestamp, 1, 7)",
-                    "project, channel_id",
+                    "project || '|' || upstream_model || '|' || substr(timestamp, 1, 7)",
+                    "project, upstream_model",
                 ),
+                CostGroupBy::ProjectModelHour => (
+                    "project || '|' || upstream_model || '|' || substr(timestamp, 1, 13)",
+                    "project, upstream_model",
+                ),
+                CostGroupBy::Hourly => ("project || '|' || substr(timestamp, 1, 13)", "project"),
             };
 
             let sql = format!(
@@ -1070,7 +1087,7 @@ impl Storage for SqliteStorage {
                 .prepare(&sql)
                 .map_err(|e| StorageError::Backend(e.to_string()))?;
             let rows = stmt
-                .query_map(params![start_ts.to_string(), end_ts.to_string()], |row| {
+                .query_map(params![start_rfc, end_rfc], |row| {
                     Ok(CostAggregate {
                         group_key: row.get(0)?,
                         total_input_tokens: row.get(1)?,
@@ -1113,6 +1130,30 @@ impl Storage for SqliteStorage {
                 )
                 .map_err(|e| StorageError::Backend(e.to_string()))?;
             Ok(deleted as u64)
+        })
+        .await
+        .map_err(|e| StorageError::Backend(format!("join error: {e}")))?
+    }
+
+    async fn list_projects(&self) -> Result<Vec<String>, StorageError> {
+        let pool = self.get_pool();
+
+        tokio::task::spawn_blocking(move || {
+            let conn = pool
+                .get()
+                .map_err(|e| StorageError::Connection(e.to_string()))?;
+
+            let mut stmt = conn
+                .prepare("SELECT DISTINCT project FROM cost_records ORDER BY project")
+                .map_err(|e| StorageError::Backend(e.to_string()))?;
+
+            let projects: Vec<String> = stmt
+                .query_map([], |row| row.get(0))
+                .map_err(|e| StorageError::Backend(e.to_string()))?
+                .filter_map(|r| r.ok())
+                .collect();
+
+            Ok(projects)
         })
         .await
         .map_err(|e| StorageError::Backend(format!("join error: {e}")))?

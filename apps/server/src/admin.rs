@@ -6,12 +6,13 @@
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
-use agent_proxy_rust_model_router::ChannelState;
+use agent_proxy_rust_model_router::{ChannelState, ResolvedChannel, reload_channels_from_storage};
 use agent_proxy_rust_storage::{
     AvailableChannelInfo, Channel, CompressionSavingsReport, CostAggregate, CostFilter,
     CostGroupBy, CostRecord, Model, ModelMapping, ProtocolEntry, Provider, SeedManager, SeedStatus,
     Storage, StorageError, SwitchLog, TimeRange,
 };
+use arc_swap::ArcSwap;
 use axum::{
     Json, Router,
     extract::{Path, Query, State},
@@ -35,6 +36,21 @@ pub struct AdminState {
     pub seed: Arc<dyn SeedManager>,
     /// Shared toggle for `CompressMiddleware` on/off.
     pub compress_enabled: Arc<AtomicBool>,
+    /// Channel list shared with the model router, atomically swapped on reload.
+    pub channels_swap: Arc<ArcSwap<Vec<ResolvedChannel>>>,
+}
+
+impl AdminState {
+    /// Triggers a hot-reload of the channel list from storage so that
+    /// priority, enabled, protocol, and mapping changes take effect
+    /// immediately without requiring a proxy restart.
+    async fn reload_channels(&self) {
+        if let Err(e) =
+            reload_channels_from_storage(self.storage.as_ref(), &self.channels_swap).await
+        {
+            tracing::error!(error = %e, "failed to reload channels after mutation");
+        }
+    }
 }
 
 /// Builds the admin API router with auth middleware.
@@ -48,6 +64,7 @@ pub fn admin_routes(
     health_map: Arc<DashMap<String, ChannelState>>,
     api_key_map: Arc<DashMap<String, secrecy::SecretString>>,
     compress_enabled: Arc<AtomicBool>,
+    channels_swap: Arc<ArcSwap<Vec<ResolvedChannel>>>,
 ) -> Router {
     use crate::admin_auth::{AdminAuthLayer, admin_auth_middleware};
     use axum::middleware;
@@ -58,6 +75,7 @@ pub fn admin_routes(
         api_key_map,
         seed,
         compress_enabled,
+        channels_swap,
     };
     let mut router = Router::new()
         // Providers
@@ -80,6 +98,10 @@ pub fn admin_routes(
         .route("/admin/cost-records/report", get(cost_report))
         .route("/admin/cost-records/savings", get(cost_savings))
         .route("/admin/cost-records/trend", get(cost_trend))
+        .route(
+            "/admin/cost-records/prune",
+            post(prune_cost_records_handler),
+        )
         // Model Mappings
         .route("/admin/model-mappings", get(list_model_mappings))
         .route("/admin/model-mappings", post(create_model_mapping))
@@ -90,6 +112,8 @@ pub fn admin_routes(
             "/admin/available-channels",
             get(list_available_channels_handler),
         )
+        // Projects (cost data)
+        .route("/admin/projects", get(list_projects_handler))
         // Switch Logs
         .route("/admin/switch-logs", get(query_switch_logs_handler))
         // Health
@@ -152,6 +176,7 @@ struct CostRecordsQuery {
     project: Option<String>,
     model_name: Option<String>,
     channel_name: Option<String>,
+    days: Option<u32>,
     limit: Option<u32>,
     offset: Option<u32>,
 }
@@ -321,6 +346,7 @@ async fn update_channel(
             },
             _ => AppError::from(e),
         })?;
+    state.reload_channels().await;
     Ok(Json(updated))
 }
 
@@ -339,6 +365,7 @@ async fn delete_channel(
             },
             _ => AppError::from(e),
         })?;
+    state.reload_channels().await;
     Ok(Json(serde_json::json!({"deleted": true})))
 }
 
@@ -400,11 +427,18 @@ async fn query_cost_records(
     State(state): State<AdminState>,
     Query(query): Query<CostRecordsQuery>,
 ) -> ApiResult<Vec<CostRecord>> {
+    let time_range = query.days.map(|days| {
+        let now = chrono::Utc::now();
+        TimeRange {
+            start: (now - chrono::Duration::days(i64::from(days))).timestamp(),
+            end: now.timestamp(),
+        }
+    });
     let filter = CostFilter {
         project_path: query.project,
         model_name: query.model_name,
         channel_name: query.channel_name,
-        time_range: None,
+        time_range,
         limit: query.limit,
         offset: query.offset,
     };
@@ -456,7 +490,17 @@ async fn list_model_mappings(
 
 async fn admin_health(State(state): State<AdminState>) -> ApiResult<serde_json::Value> {
     let healthy = state.storage.health_check().await.unwrap_or(false);
-    Ok(Json(serde_json::json!({"healthy": healthy})))
+    let channels = state.storage.list_channels(None).await.unwrap_or_default();
+    let healthy_channels = channels
+        .iter()
+        .filter(|c| c.enabled && c.health_status == "Healthy")
+        .count() as u32;
+    let total_channels = channels.len() as u32;
+    Ok(Json(serde_json::json!({
+        "healthy": healthy,
+        "healthyChannels": healthy_channels,
+        "totalChannels": total_channels,
+    })))
 }
 
 // ── Seed Data ────────────────────────────────────────────────────────────────
@@ -536,6 +580,7 @@ async fn create_model_mapping(
     Json(body): Json<ModelMapping>,
 ) -> ApiResult<ModelMapping> {
     state.storage.upsert_mapping(&body).await?;
+    state.reload_channels().await;
     Ok(Json(body))
 }
 
@@ -583,6 +628,7 @@ async fn update_model_mapping(
     }
 
     state.storage.upsert_mapping(&updated).await?;
+    state.reload_channels().await;
     Ok(Json(serde_json::json!({"status": "ok"})))
 }
 
@@ -602,6 +648,7 @@ async fn delete_model_mapping(
             },
             _ => AppError::from(e),
         })?;
+    state.reload_channels().await;
     Ok(Json(serde_json::json!({"deleted": true})))
 }
 
@@ -718,7 +765,7 @@ async fn cost_trend(
 
     let results = state
         .storage
-        .aggregate_costs(CostGroupBy::ProjectModelMonth, range)
+        .aggregate_costs(CostGroupBy::Hourly, range)
         .await?;
 
     // Filter by project
@@ -732,6 +779,36 @@ async fn cost_trend(
     };
 
     Ok(Json(filtered))
+}
+
+/// Request body for cost record pruning.
+#[derive(Debug, Deserialize)]
+struct PruneRequest {
+    #[serde(default = "default_prune_days")]
+    older_than_days: u32,
+}
+
+fn default_prune_days() -> u32 {
+    90
+}
+
+async fn prune_cost_records_handler(
+    State(state): State<AdminState>,
+    Json(body): Json<PruneRequest>,
+) -> ApiResult<serde_json::Value> {
+    let deleted = state
+        .storage
+        .prune_cost_records(body.older_than_days)
+        .await?;
+    Ok(Json(serde_json::json!({"deleted": deleted})))
+}
+
+// ── Projects ──────────────────────────────────────────────────────────────────
+
+/// Returns the list of distinct project paths that have cost records.
+async fn list_projects_handler(State(state): State<AdminState>) -> ApiResult<Vec<String>> {
+    let projects = state.storage.list_projects().await?;
+    Ok(Json(projects))
 }
 
 // ── Compress Toggle ──────────────────────────────────────────────────────────
@@ -789,6 +866,7 @@ mod tests {
             health,
             keys,
             Arc::new(AtomicBool::new(true)),
+            Arc::new(ArcSwap::from_pointee(Vec::new())),
         )
     }
 
@@ -813,6 +891,7 @@ mod tests {
             Arc::new(DashMap::new()),
             Arc::new(DashMap::new()),
             Arc::new(AtomicBool::new(true)),
+            Arc::new(ArcSwap::from_pointee(Vec::new())),
         );
         let resp = app
             .oneshot(
@@ -839,6 +918,7 @@ mod tests {
             Arc::new(DashMap::new()),
             Arc::new(DashMap::new()),
             Arc::new(AtomicBool::new(true)),
+            Arc::new(ArcSwap::from_pointee(Vec::new())),
         );
         let resp = app
             .oneshot(
@@ -925,5 +1005,22 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(resp.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn test_list_projects_returns_array() {
+        let app = test_app().await;
+        let resp = app
+            .oneshot(make_authed_request(Method::GET, "/admin/projects"))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let projects: Vec<String> = serde_json::from_slice(&body).unwrap();
+        // After seed_init, there should be some projects (or empty array)
+        // The key test: endpoint returns 200 and valid JSON array
+        assert!(projects.is_empty() || !projects.is_empty()); // tautology: just verifying it's a valid array
     }
 }

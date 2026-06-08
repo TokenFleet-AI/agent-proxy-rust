@@ -287,6 +287,10 @@ pub enum CostGroupBy {
     Channel,
     /// Aggregate per project × model × month.
     ProjectModelMonth,
+    /// Aggregate per project × model × hour (for trend charts).
+    ProjectModelHour,
+    /// Aggregate per hour only (for trend chart, all models merged).
+    Hourly,
 }
 
 /// Aggregated cost summary row.

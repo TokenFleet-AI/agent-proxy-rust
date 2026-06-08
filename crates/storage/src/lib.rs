@@ -121,6 +121,9 @@ pub trait Storage: Send + Sync + Debug {
     /// Delete records older than N days, returning the count of deleted rows.
     async fn prune_cost_records(&self, older_than_days: u32) -> Result<u64, StorageError>;
 
+    /// List distinct project paths from cost records, sorted alphabetically.
+    async fn list_projects(&self) -> Result<Vec<String>, StorageError>;
+
     // ── Switch Log ──────────────────────────────────────────
 
     /// Record a channel switch event.

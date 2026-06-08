@@ -256,6 +256,63 @@ async fn test_insert_and_query_cost_records() {
     assert_eq!(records[0].input_tokens, 1000);
 }
 
+#[tokio::test]
+#[serial]
+async fn test_list_projects_returns_sorted_unique() {
+    let storage = setup().await;
+    // Insert records with different projects (out of order to verify sorting)
+    let now = Utc::now().to_rfc3339();
+    for project in &["/zebra", "/alpha", "/beta", "/alpha"] {
+        let record = CostRecord {
+            id: uuid::Uuid::now_v7().to_string(),
+            channel_id: String::new(),
+            upstream_channel: String::new(),
+            upstream_model: String::new(),
+            request_time_ms: 0,
+            project: (*project).to_string(),
+            user_id: String::new(),
+            agent_type: String::new(),
+            input_tokens: 0,
+            output_tokens: 0,
+            cache_write_tokens: 0,
+            cache_read_tokens: 0,
+            thinking_tokens: 0,
+            cost: 0.0,
+            schema_saved_tokens: 0,
+            response_saved_tokens: 0,
+            rtk_saved_tokens: 0,
+            pre_compress_tokens: 0,
+            post_compress_tokens: 0,
+            compression_tokens_saved: 0,
+            unit: String::new(),
+            pricing_snapshot_json: String::new(),
+            timestamp: now.clone(),
+            session_id: None,
+            before_tokens: 0,
+            after_tokens: 0,
+            tokens_saved: 0,
+            compression_breakdown_json: String::new(),
+        };
+        storage.insert_cost_record(&record).await.expect("insert");
+    }
+    let projects = storage.list_projects().await.expect("list_projects failed");
+    assert_eq!(
+        projects,
+        vec!["/alpha", "/beta", "/zebra"],
+        "projects should be sorted and deduplicated"
+    );
+}
+
+#[tokio::test]
+#[serial]
+async fn test_list_projects_empty_returns_empty_vec() {
+    let storage = SqliteStorage::new_in_memory().expect("create in-memory");
+    storage.migrate().await.expect("migrate");
+    // No seed init — no cost records inserted
+    let projects = storage.list_projects().await.expect("list_projects failed");
+    assert!(projects.is_empty());
+}
+
 // ── Switch Log ────────────────────────────────────────────────────────────────
 
 #[tokio::test]

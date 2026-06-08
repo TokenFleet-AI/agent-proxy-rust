@@ -20,6 +20,7 @@ use agent_proxy_rust_core::{
 };
 use agent_proxy_rust_storage::ProtocolEntry;
 use agent_proxy_rust_storage::Storage;
+use arc_swap::ArcSwap;
 use async_trait::async_trait;
 use dashmap::DashMap;
 use secrecy::ExposeSecret;
@@ -34,15 +35,23 @@ const COOLDOWN: Duration = Duration::from_secs(60);
 
 /// Parsed in-memory representation of a channel with its model mappings.
 #[derive(Debug, Clone)]
-struct ResolvedChannel {
-    channel_id: String,
-    channel_name: String,
-    api_key: secrecy::SecretString,
-    protocols: Vec<ProtocolEntry>,
-    enabled: bool,
-    force_protocol: Option<String>,
-    priority: u32,
-    mappings: Vec<ResolvedMapping>,
+pub struct ResolvedChannel {
+    /// Channel ID.
+    pub channel_id: String,
+    /// Human-readable channel name.
+    pub channel_name: String,
+    /// API key for upstream requests.
+    pub api_key: secrecy::SecretString,
+    /// Supported protocols parsed from the channel's JSON configuration.
+    pub protocols: Vec<ProtocolEntry>,
+    /// Whether the channel is enabled.
+    pub enabled: bool,
+    /// Optional protocol override.
+    pub force_protocol: Option<String>,
+    /// Routing priority (higher = selected first).
+    pub priority: u32,
+    /// Model mappings bound to this channel.
+    pub mappings: Vec<ResolvedMapping>,
 }
 
 impl ResolvedChannel {
@@ -55,13 +64,17 @@ impl ResolvedChannel {
 
 /// Parsed in-memory representation of a model mapping.
 #[derive(Debug, Clone)]
-struct ResolvedMapping {
-    mapping_id: String,
-    client_name: String,
-    upstream_name: String,
-    billing: ChannelBilling,
+pub struct ResolvedMapping {
+    /// Mapping ID for quota tracking.
+    pub mapping_id: String,
+    /// Client-facing model name.
+    pub client_name: String,
+    /// Upstream model name sent to the API.
+    pub upstream_name: String,
+    /// Billing type (flat-fee or metered).
+    pub billing: ChannelBilling,
     /// Protocols this mapping is valid for. Empty = all protocols (backward compatible).
-    allowed_protocols: Vec<String>,
+    pub allowed_protocols: Vec<String>,
 }
 
 /// Lightweight mapping info stored in the context extension.
@@ -85,7 +98,7 @@ pub struct SelectedMappingInfo {
 
 /// Channel selection and model routing middleware.
 pub struct ModelRouterMiddleware {
-    channels: Vec<ResolvedChannel>,
+    channels: Arc<ArcSwap<Vec<ResolvedChannel>>>,
     health: Arc<DashMap<String, ChannelState>>,
     /// Per-mapping-id quota consumption counters. Keys match `model_mappings.id`.
     quota_usage: Arc<DashMap<String, QuotaUsage>>,
@@ -98,7 +111,7 @@ pub struct ModelRouterMiddleware {
 impl std::fmt::Debug for ModelRouterMiddleware {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("ModelRouterMiddleware")
-            .field("channels", &self.channels)
+            .field("channels", &self.channels.load())
             .field("health", &self.health)
             .field("quota_usage", &self.quota_usage)
             .field("channel_api_keys", &"<DashMap>")
@@ -220,7 +233,7 @@ impl ModelRouterMiddleware {
         }
 
         Ok(Self {
-            channels,
+            channels: Arc::new(ArcSwap::from_pointee(channels)),
             health,
             quota_usage: Arc::new(DashMap::new()),
             channel_api_keys,
@@ -242,10 +255,20 @@ impl ModelRouterMiddleware {
         &self.channel_api_keys
     }
 
+    /// Returns a clone of the atomic channel list Arc so the admin API can
+    /// trigger a hot-reload after mutations (priority, enabled, etc.).
+    #[must_use]
+    pub fn channels_swap(&self) -> Arc<ArcSwap<Vec<ResolvedChannel>>> {
+        Arc::clone(&self.channels)
+    }
+
     /// Finds all candidate mappings for a given client model name.
-    fn find_candidates(&self, client_name: &str) -> Vec<(&ResolvedChannel, &ResolvedMapping)> {
+    fn find_candidates<'c>(
+        channels: &'c [ResolvedChannel],
+        client_name: &str,
+    ) -> Vec<(&'c ResolvedChannel, &'c ResolvedMapping)> {
         let mut candidates = Vec::new();
-        for ch in &self.channels {
+        for ch in channels {
             if !ch.enabled {
                 continue;
             }
@@ -364,6 +387,95 @@ impl ModelRouterMiddleware {
     }
 }
 
+/// Hot-reloads the in-memory channel list from storage and atomically swaps
+/// it into `channels_swap`.
+///
+/// Called by the admin API after channel mutations (create, update, delete)
+/// so that priority, enabled, protocol, and mapping changes take effect
+/// immediately without requiring a proxy restart.
+///
+/// # Errors
+///
+/// Returns `ProxyError::Internal` if the storage backend fails or if any
+/// channel has an unrecognized protocol string.
+pub async fn reload_channels_from_storage(
+    storage: &dyn Storage,
+    channels_swap: &ArcSwap<Vec<ResolvedChannel>>,
+) -> Result<(), ProxyError> {
+    let storage_channels = storage
+        .list_channels(None)
+        .await
+        .map_err(|e| ProxyError::Internal(e.into()))?;
+
+    let mut channels = Vec::with_capacity(storage_channels.len());
+
+    for ch in storage_channels {
+        let protocols: Vec<ProtocolEntry> = serde_json::from_str(&ch.protocols).unwrap_or_default();
+        if protocols.is_empty() {
+            warn!(
+                channel = %ch.id,
+                "channel has no protocols configured, skipping"
+            );
+            continue;
+        }
+
+        let storage_mappings = storage
+            .list_mappings(&ch.id)
+            .await
+            .map_err(|e| ProxyError::Internal(e.into()))?;
+
+        let mappings: Vec<ResolvedMapping> = storage_mappings
+            .into_iter()
+            .filter(|m| m.enabled)
+            .filter_map(|m| {
+                let billing = ChannelBilling::from_storage(&m.billing, &m.pricing_json)
+                    .map_err(|e| {
+                        warn!(
+                            channel = %ch.id,
+                            mapping = %m.id,
+                            error = %e,
+                            "failed to parse mapping billing/pricing, skipping"
+                        );
+                    })
+                    .ok()?;
+                let allowed_protocols: Vec<String> =
+                    serde_json::from_str(&m.protocols).unwrap_or_default();
+                Some(ResolvedMapping {
+                    mapping_id: m.id,
+                    client_name: m.client_name,
+                    upstream_name: m.upstream_name,
+                    billing,
+                    allowed_protocols,
+                })
+            })
+            .collect();
+
+        let protocols: Vec<ProtocolEntry> = protocols
+            .into_iter()
+            .map(|mut p| {
+                p.base_url = p.base_url.trim_end_matches('/').to_string();
+                p.rewrite_path = p.rewrite_path.filter(|rp| !rp.is_empty());
+                p
+            })
+            .collect();
+
+        channels.push(ResolvedChannel {
+            channel_id: ch.id,
+            channel_name: ch.name,
+            api_key: ch.api_key,
+            protocols,
+            enabled: ch.enabled,
+            force_protocol: ch.force_protocol,
+            priority: ch.priority,
+            mappings,
+        });
+    }
+
+    channels_swap.store(Arc::new(channels));
+    tracing::info!(count = channels_swap.load().len(), "channels hot-reloaded");
+    Ok(())
+}
+
 #[async_trait]
 impl ProxyMiddleware for ModelRouterMiddleware {
     #[allow(clippy::too_many_lines)]
@@ -387,7 +499,9 @@ impl ProxyMiddleware for ModelRouterMiddleware {
             ));
         }
 
-        let candidates = self.find_candidates(&client_name);
+        // Hold the Arc guard for the entire request so references remain valid.
+        let channels = self.channels.load();
+        let candidates = Self::find_candidates(&channels, &client_name);
 
         if candidates.is_empty() {
             return Err(ProxyError::ChannelSelection { model: client_name });
@@ -773,7 +887,7 @@ mod tests {
 
     fn make_middleware(channels: Vec<ResolvedChannel>) -> ModelRouterMiddleware {
         ModelRouterMiddleware {
-            channels,
+            channels: Arc::new(ArcSwap::from_pointee(channels)),
             health: Arc::new(DashMap::new()),
             quota_usage: Arc::new(DashMap::new()),
             channel_api_keys: Arc::new(DashMap::new()),
@@ -803,7 +917,8 @@ mod tests {
             ),
         ]);
 
-        let candidates = mw.find_candidates("claude-sonnet");
+        let channels = mw.channels.load();
+        let candidates = ModelRouterMiddleware::find_candidates(&channels, "claude-sonnet");
         let (ch, m) = mw.select_channel(&candidates, "claude-sonnet").unwrap();
         assert_eq!(ch.channel_id, "sub");
         assert!(m.billing.is_flat_fee());
@@ -836,7 +951,8 @@ mod tests {
             ),
         ]);
 
-        let candidates = mw.find_candidates("claude-sonnet");
+        let channels = mw.channels.load();
+        let candidates = ModelRouterMiddleware::find_candidates(&channels, "claude-sonnet");
         let (ch, _m) = mw.select_channel(&candidates, "claude-sonnet").unwrap();
         assert_eq!(ch.channel_id, "metered");
     }
@@ -860,7 +976,8 @@ mod tests {
             }],
         )]);
 
-        let candidates = mw.find_candidates("claude-sonnet");
+        let channels = mw.channels.load();
+        let candidates = ModelRouterMiddleware::find_candidates(&channels, "claude-sonnet");
         let err = mw.select_channel(&candidates, "claude-sonnet").unwrap_err();
         assert!(matches!(err, ProxyError::ChannelSelection { .. }));
     }
@@ -885,7 +1002,8 @@ mod tests {
         mw.mark_unhealthy_immediate("m1");
         mw.mark_unhealthy_immediate("m2");
 
-        let candidates = mw.find_candidates("claude-sonnet");
+        let channels = mw.channels.load();
+        let candidates = ModelRouterMiddleware::find_candidates(&channels, "claude-sonnet");
         let err = mw.select_channel(&candidates, "claude-sonnet").unwrap_err();
         assert!(matches!(err, ProxyError::ChannelSelection { .. }));
     }
@@ -899,7 +1017,8 @@ mod tests {
             vec![make_mapping_metered("claude-sonnet", "claude-opus-4-7")],
         )]);
 
-        let candidates = mw.find_candidates("nonexistent-model");
+        let channels = mw.channels.load();
+        let candidates = ModelRouterMiddleware::find_candidates(&channels, "nonexistent-model");
         assert!(candidates.is_empty());
     }
 
@@ -907,7 +1026,7 @@ mod tests {
     fn test_disabled_channel_skipped() {
         let mw = ModelRouterMiddleware {
             quota_usage: Arc::new(DashMap::new()),
-            channels: vec![ResolvedChannel {
+            channels: Arc::new(ArcSwap::from_pointee(vec![ResolvedChannel {
                 channel_id: "disabled".into(),
                 channel_name: "Disabled".into(),
                 api_key: secrecy::SecretString::from("sk-test"),
@@ -919,12 +1038,13 @@ mod tests {
                 force_protocol: None,
                 priority: 0,
                 mappings: vec![make_mapping_metered("claude-sonnet", "claude-opus-4-7")],
-            }],
+            }])),
             health: Arc::new(DashMap::new()),
             channel_api_keys: Arc::new(DashMap::new()),
         };
 
-        let candidates = mw.find_candidates("claude-sonnet");
+        let channels = mw.channels.load();
+        let candidates = ModelRouterMiddleware::find_candidates(&channels, "claude-sonnet");
         assert!(candidates.is_empty());
     }
 

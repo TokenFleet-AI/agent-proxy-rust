@@ -49,10 +49,12 @@ async fn main() -> Result<()> {
     let seed: Arc<dyn SeedManager> = Arc::new(db_storage);
     let model_router = ModelRouterMiddleware::from_storage(storage.clone()).await?;
 
-    // Share the in-memory health map and API-key map with the admin API so
-    // that runtime changes (e.g. setting an API key) take effect immediately.
+    // Share the in-memory health map, API-key map, and channel list with the
+    // admin API so that runtime changes (e.g. priority, enabled, API key)
+    // take effect immediately without restarting the proxy.
     let health_map = Arc::clone(model_router.health_map());
     let api_key_map = Arc::clone(model_router.api_key_map());
+    let channels_swap = model_router.channels_swap();
 
     let admin_key = admin_auth::resolve_admin_key();
     let compress = CompressMiddleware::new();
@@ -64,6 +66,7 @@ async fn main() -> Result<()> {
         health_map,
         api_key_map,
         compress_enabled,
+        channels_swap,
     );
 
     eprintln!("[agent-proxy] Admin key: {admin_key}");

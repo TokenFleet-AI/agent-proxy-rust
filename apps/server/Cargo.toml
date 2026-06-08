@@ -19,6 +19,7 @@ agent-proxy-rust-model-router.workspace = true
 agent-proxy-rust-bridge.workspace = true
 agent-proxy-rust-compress.workspace = true
 agent-proxy-rust-cost.workspace = true
+arc-swap = "1"
 dashmap = "6"
 secrecy = "0.10"
 anyhow.workspace = true
