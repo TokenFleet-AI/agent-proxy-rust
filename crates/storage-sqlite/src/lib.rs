@@ -1067,9 +1067,22 @@ impl Storage for SqliteStorage {
                     "project || '|' || upstream_model || '|' || substr(timestamp, 1, 13)",
                     "project, upstream_model",
                 ),
-                CostGroupBy::Hourly => ("project || '|' || substr(timestamp, 1, 13)", "project"),
+                CostGroupBy::Hourly => (
+                    "substr(timestamp, 1, 13)",
+                    "substr(timestamp, 1, 13)",
+                ),
+                CostGroupBy::Daily => (
+                    "substr(timestamp, 1, 10)",
+                    "substr(timestamp, 1, 10)",
+                ),
             };
 
+            // Build WHERE clause with optional project filter
+            let project_filter = range
+                .project
+                .as_ref()
+                .map(|_| " AND project = ?3")
+                .unwrap_or("");
             let sql = format!(
                 "SELECT {group_key_expr} as group_key,
                         SUM(input_tokens) as total_input_tokens,
@@ -1078,7 +1091,7 @@ impl Storage for SqliteStorage {
                         SUM(compression_tokens_saved) as total_compression_tokens_saved,
                         COUNT(*) as request_count
                  FROM cost_records
-                 WHERE timestamp >= ?1 AND timestamp < ?2
+                 WHERE timestamp >= ?1 AND timestamp < ?2{project_filter}
                  GROUP BY {group_clause}
                  ORDER BY total_actual_cost DESC"
             );
@@ -1086,17 +1099,29 @@ impl Storage for SqliteStorage {
             let mut stmt = conn
                 .prepare(&sql)
                 .map_err(|e| StorageError::Backend(e.to_string()))?;
+
+            let mut params: Vec<Box<dyn rusqlite::types::ToSql>> = vec![
+                Box::new(start_rfc),
+                Box::new(end_rfc),
+            ];
+            if let Some(ref proj) = range.project {
+                params.push(Box::new(proj.clone()));
+            }
+
             let rows = stmt
-                .query_map(params![start_rfc, end_rfc], |row| {
-                    Ok(CostAggregate {
-                        group_key: row.get(0)?,
-                        total_input_tokens: row.get(1)?,
-                        total_output_tokens: row.get(2)?,
-                        total_actual_cost: row.get(3)?,
-                        total_compression_tokens_saved: row.get(4)?,
-                        request_count: row.get(5)?,
-                    })
-                })
+                .query_map(
+                    rusqlite::params_from_iter(params.iter().map(|p| p.as_ref())),
+                    |row| {
+                        Ok(CostAggregate {
+                            group_key: row.get(0)?,
+                            total_input_tokens: row.get(1)?,
+                            total_output_tokens: row.get(2)?,
+                            total_actual_cost: row.get(3)?,
+                            total_compression_tokens_saved: row.get(4)?,
+                            request_count: row.get(5)?,
+                        })
+                    },
+                )
                 .map_err(|e| StorageError::Backend(e.to_string()))?;
 
             let mut results = Vec::new();

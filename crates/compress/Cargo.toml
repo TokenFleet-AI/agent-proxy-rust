@@ -8,8 +8,8 @@ repository.workspace = true
 homepage.workspace = true
 
 [dependencies]
-agent-proxy-rust-core = { path = "../core" }
-tokenless-schema = { path = "../../../tokenless/crates/tokenless-schema" }
+agent-proxy-rust-core = { path = "../core", version = "1.0.0" }
+tokenless-schema = "1.0"
 async-trait = "0.1"
 bytes = "1"
 chrono = "0.4"

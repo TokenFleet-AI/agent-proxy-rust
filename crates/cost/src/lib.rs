@@ -278,15 +278,40 @@ fn extract_openai_chat(body: &serde_json::Value) -> Usage {
         .and_then(|d| d.get("cached_tokens"))
         .and_then(serde_json::Value::as_u64)
         .unwrap_or(0);
+
+    // Standard OpenAI: prompt_tokens + completion_tokens
+    let prompt_tokens = usage
+        .get("prompt_tokens")
+        .and_then(serde_json::Value::as_u64)
+        .unwrap_or(0);
+    let completion_tokens = usage
+        .get("completion_tokens")
+        .and_then(serde_json::Value::as_u64)
+        .unwrap_or(0);
+
+    // DashScope / some providers: total_tokens only (split as 50/50 if no breakdown)
+    // Or use input/output as alternative field names
+    let (input, output) = if prompt_tokens > 0 || completion_tokens > 0 {
+        (prompt_tokens, completion_tokens)
+    } else if let Some(total) = usage.get("total_tokens").and_then(serde_json::Value::as_u64) {
+        // Fallback: split total as 50/50 (conservative estimate)
+        (total / 2, total / 2)
+    } else {
+        // Try DashScope-specific field names
+        let input = usage
+            .get("input")
+            .and_then(serde_json::Value::as_u64)
+            .unwrap_or(0);
+        let output = usage
+            .get("output")
+            .and_then(serde_json::Value::as_u64)
+            .unwrap_or(0);
+        (input, output)
+    };
+
     Usage {
-        input_tokens: usage
-            .get("prompt_tokens")
-            .and_then(serde_json::Value::as_u64)
-            .unwrap_or(0),
-        output_tokens: usage
-            .get("completion_tokens")
-            .and_then(serde_json::Value::as_u64)
-            .unwrap_or(0),
+        input_tokens: input,
+        output_tokens: output,
         cache_write_tokens: 0,
         cache_read_tokens: cache_read,
         thinking_tokens: 0,

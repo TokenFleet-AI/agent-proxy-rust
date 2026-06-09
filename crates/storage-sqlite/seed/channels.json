@@ -56,7 +56,7 @@
     "name": "DashScope Token Plan",
     "api_key": "",
     "protocol": "openai_chat",
-    "protocols": "[{\"protocol\":\"openai_chat\",\"baseUrl\":\"https://token-plan.cn-beijing.maas.aliyuncs.com\",\"rewritePath\":\"/compatible-mode/v1\"},{\"protocol\":\"anthropic_messages\",\"baseUrl\":\"https://token-plan.cn-beijing.maas.aliyuncs.com\",\"rewritePath\":\"/apps/anthropic\"}]",
+    "protocols": "[{\"protocol\":\"openai_chat\",\"baseUrl\":\"https://token-plan.cn-beijing.maas.aliyuncs.com\",\"rewritePath\":\"/compatible-mode/v1\"},{\"protocol\":\"anthropic_messages\",\"baseUrl\":\"https://token-plan.cn-beijing.maas.aliyuncs.com/apps/anthropic\",\"rewritePath\":\"\"}]",
     "is_builtin": true,
     "enabled": true,
     "billing_type": "metered",

@@ -12,8 +12,8 @@ repository.workspace = true
 homepage.workspace = true
 
 [dependencies]
-agent-proxy-rust-core = { path = "../core" }
-agent-proxy-rust-storage = { path = "../storage" }
+agent-proxy-rust-core = { path = "../core", version = "1.0.0" }
+agent-proxy-rust-storage = { path = "../storage", version = "1.0.0" }
 anyhow = { workspace = true }
 async-trait = "0.1"
 bytes = "1"

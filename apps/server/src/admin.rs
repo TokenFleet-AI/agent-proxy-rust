@@ -432,6 +432,7 @@ async fn query_cost_records(
         TimeRange {
             start: (now - chrono::Duration::days(i64::from(days))).timestamp(),
             end: now.timestamp(),
+            project: None,
         }
     });
     let filter = CostFilter {
@@ -688,6 +689,8 @@ struct CostReportQuery {
     project: Option<String>,
     #[serde(default = "default_days")]
     days: u32,
+    #[serde(default)]
+    group_by: Option<String>,
 }
 
 fn default_days() -> u32 {
@@ -703,6 +706,7 @@ async fn cost_report(
     let range = TimeRange {
         start: (now - chrono::Duration::days(i64::from(query.days))).timestamp(),
         end: now.timestamp(),
+        project: None,
     };
 
     let group_by = if query.project.is_some() {
@@ -730,6 +734,7 @@ async fn cost_savings(
     let range = TimeRange {
         start: (now - chrono::Duration::days(i64::from(query.days))).timestamp(),
         end: now.timestamp(),
+        project: None,
     };
 
     let filter = CostFilter {
@@ -752,7 +757,7 @@ async fn cost_savings(
     Ok(Json(report))
 }
 
-/// Returns hourly cost trend for a project.
+/// Returns hourly cost trend (aggregated across all projects per hour).
 async fn cost_trend(
     State(state): State<AdminState>,
     Query(query): Query<CostReportQuery>,
@@ -761,24 +766,20 @@ async fn cost_trend(
     let range = TimeRange {
         start: (now - chrono::Duration::days(i64::from(query.days))).timestamp(),
         end: now.timestamp(),
+        project: query.project.clone(),
+    };
+
+    let group_by = match query.group_by.as_deref() {
+        Some("daily") => CostGroupBy::Daily,
+        _ => CostGroupBy::Hourly,
     };
 
     let results = state
         .storage
-        .aggregate_costs(CostGroupBy::Hourly, range)
+        .aggregate_costs(group_by, range)
         .await?;
 
-    // Filter by project
-    let filtered: Vec<CostAggregate> = if let Some(ref project) = query.project {
-        results
-            .into_iter()
-            .filter(|r| r.group_key.starts_with(project))
-            .collect()
-    } else {
-        results
-    };
-
-    Ok(Json(filtered))
+    Ok(Json(results))
 }
 
 /// Request body for cost record pruning.

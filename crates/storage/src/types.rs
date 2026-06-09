@@ -274,6 +274,8 @@ pub struct TimeRange {
     pub start: i64,
     /// End of the range (exclusive).
     pub end: i64,
+    /// Optional project filter.
+    pub project: Option<String>,
 }
 
 /// Grouping dimension for cost aggregation.
@@ -291,6 +293,8 @@ pub enum CostGroupBy {
     ProjectModelHour,
     /// Aggregate per hour only (for trend chart, all models merged).
     Hourly,
+    /// Aggregate per day only (for Dashboard trend charts).
+    Daily,
 }
 
 /// Aggregated cost summary row.

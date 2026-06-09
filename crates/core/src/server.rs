@@ -713,10 +713,18 @@ fn extract_usage_from_sse(body: &[u8]) -> serde_json::Value {
         return serde_json::Value::Null;
     };
 
+    // Normalize SSE format: ensure `data:` has a space after colon
+    // Different providers use different formats:
+    // - Anthropic/DeepSeek: `data: {...}` (with space)
+    // - DashScope: `data:{...}` (no space)
+    let normalized = normalize_sse_format(text);
+
     let mut merged: serde_json::Map<String, serde_json::Value> = serde_json::Map::new();
 
-    for line in text.lines() {
-        let data = line.strip_prefix("data: ").unwrap_or(line);
+    for line in normalized.lines() {
+        let Some(data) = line.strip_prefix("data: ") else {
+            continue;
+        };
         if data.is_empty() || data == "[DONE]" {
             continue;
         }
@@ -748,6 +756,13 @@ fn extract_usage_from_sse(body: &[u8]) -> serde_json::Value {
         {
             merge_usage_fields(&mut merged, u);
         }
+        // Other providers: usage at top level (no choices wrapper)
+        if let Some(u) = event.get("usage")
+            && event.get("choices").is_none()
+            && event.get("type").is_none()
+        {
+            merge_usage_fields(&mut merged, u);
+        }
     }
 
     if merged.is_empty() {
@@ -755,6 +770,35 @@ fn extract_usage_from_sse(body: &[u8]) -> serde_json::Value {
     } else {
         serde_json::json!({"usage": serde_json::Value::Object(merged)})
     }
+}
+
+/// Normalizes SSE format to ensure consistent parsing.
+///
+/// Handles format variations from different providers:
+/// - `data:{...}` → `data: {...}` (add space after colon)
+/// - `event:message_start` → `event: message_start`
+/// - Strips trailing whitespace from lines
+#[must_use]
+fn normalize_sse_format(text: &str) -> String {
+    text.lines()
+        .map(|line| {
+            let line = line.trim_end();
+            // Add space after `data:` if missing
+            if let Some(rest) = line.strip_prefix("data:")
+                && !rest.starts_with(' ')
+            {
+                return format!("data: {rest}");
+            }
+            // Add space after `event:` if missing
+            if let Some(rest) = line.strip_prefix("event:")
+                && !rest.starts_with(' ')
+            {
+                return format!("event: {rest}");
+            }
+            line.to_owned()
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 /// Merges usage fields from an SSE event into the accumulator map.
@@ -1030,5 +1074,84 @@ mod tests {
             .unwrap();
 
         assert_eq!(response.status(), StatusCode::OK);
+    }
+
+    // ── extract_usage_from_sse tests ──────────────────────────────
+
+    #[test]
+    fn test_extract_usage_from_sse_with_space() {
+        // DeepSeek format: `data: {...}` (with space after colon)
+        let body = b"event: message_start\n\
+            data: {\"type\":\"message_start\",\"message\":{\"usage\":{\"input_tokens\":100,\"output_tokens\":0}}}\n\n\
+            event: message_delta\n\
+            data: {\"type\":\"message_delta\",\"usage\":{\"output_tokens\":50,\"cache_read_input_tokens\":30}}\n\n";
+        let result = extract_usage_from_sse(body);
+        let usage = result.get("usage").unwrap();
+        assert_eq!(usage.get("input_tokens").unwrap().as_u64().unwrap(), 100);
+        assert_eq!(usage.get("output_tokens").unwrap().as_u64().unwrap(), 50);
+        assert_eq!(
+            usage
+                .get("cache_read_input_tokens")
+                .unwrap()
+                .as_u64()
+                .unwrap(),
+            30
+        );
+    }
+
+    #[test]
+    fn test_extract_usage_from_sse_without_space() {
+        // DashScope format: `data:{...}` (no space after colon)
+        let body = b"event:message_start\n\
+            data:{\"type\":\"message_start\",\"message\":{\"usage\":{\"input_tokens\":200,\"output_tokens\":0}}}\n\n\
+            event:message_delta\n\
+            data:{\"type\":\"message_delta\",\"usage\":{\"output_tokens\":80,\"cache_read_input_tokens\":60}}\n\n";
+        let result = extract_usage_from_sse(body);
+        let usage = result.get("usage").unwrap();
+        assert_eq!(usage.get("input_tokens").unwrap().as_u64().unwrap(), 200);
+        assert_eq!(usage.get("output_tokens").unwrap().as_u64().unwrap(), 80);
+        assert_eq!(
+            usage
+                .get("cache_read_input_tokens")
+                .unwrap()
+                .as_u64()
+                .unwrap(),
+            60
+        );
+    }
+
+    #[test]
+    fn test_extract_usage_from_sse_mixed_format() {
+        // Mixed format (shouldn't happen in practice, but test robustness)
+        let body = b"event:message_start\n\
+            data:{\"type\":\"message_start\",\"message\":{\"usage\":{\"input_tokens\":150,\"output_tokens\":0}}}\n\n\
+            event: message_delta\n\
+            data: {\"type\":\"message_delta\",\"usage\":{\"output_tokens\":90}}\n\n";
+        let result = extract_usage_from_sse(body);
+        let usage = result.get("usage").unwrap();
+        assert_eq!(usage.get("input_tokens").unwrap().as_u64().unwrap(), 150);
+        assert_eq!(usage.get("output_tokens").unwrap().as_u64().unwrap(), 90);
+    }
+
+    #[test]
+    fn test_normalize_sse_format() {
+        // Test DashScope format (no space)
+        let input = "event:message_start\ndata:{\"type\":\"message_start\"}\n\n";
+        let output = normalize_sse_format(input);
+        assert!(output.contains("event: message_start"));
+        assert!(output.contains("data: {\"type\":\"message_start\"}"));
+
+        // Test standard format (with space) - should remain unchanged
+        let input2 = "event: message_start\ndata: {\"type\":\"message_start\"}\n\n";
+        let output2 = normalize_sse_format(input2);
+        assert_eq!(output2.trim(), input2.trim());
+
+        // Test mixed format
+        let input3 = "event:message_start\ndata: {\"type\":\"message_start\"}\n\nevent: message_delta\ndata:{\"type\":\"message_delta\"}";
+        let output3 = normalize_sse_format(input3);
+        assert!(output3.contains("event: message_start"));
+        assert!(output3.contains("data: {\"type\":\"message_start\"}"));
+        assert!(output3.contains("event: message_delta"));
+        assert!(output3.contains("data: {\"type\":\"message_delta\"}"));
     }
 }

@@ -297,6 +297,13 @@ impl ModelRouterMiddleware {
 
         // Phase 1: try FlatFee channels first
         for (ch, m) in &flatfee {
+            if !self.has_api_key(&ch.channel_id) {
+                debug!(
+                    channel = %ch.channel_id,
+                    "skipping flat-fee channel: no API key configured"
+                );
+                continue;
+            }
             if !self.is_healthy(&ch.channel_id) {
                 continue;
             }
@@ -331,13 +338,23 @@ impl ModelRouterMiddleware {
 
         // Phase 1: try Metered channels
         for (ch, m) in &metered {
+            if !self.has_api_key(&ch.channel_id) {
+                debug!(
+                    channel = %ch.channel_id,
+                    "skipping metered channel: no API key configured"
+                );
+                continue;
+            }
             if self.is_healthy(&ch.channel_id) {
                 return Ok((ch, m));
             }
         }
 
-        // All unhealthy — try any channel past cooldown
+        // All unhealthy — try any channel past cooldown that has a valid key
         for (ch, m) in candidates {
+            if !self.has_api_key(&ch.channel_id) {
+                continue;
+            }
             if self.is_tryable_past_cooldown(&ch.channel_id) {
                 warn!(
                     channel = %ch.channel_id,
@@ -351,6 +368,24 @@ impl ModelRouterMiddleware {
         Err(ProxyError::ChannelSelection {
             model: client_name.to_owned(),
         })
+    }
+
+    /// Returns `true` when a channel has a usable API key.
+    ///
+    /// Checks the runtime override map first (so admin API key updates take
+    /// effect immediately), then falls back to the key loaded from storage
+    /// at startup. Channels without any key are permanently excluded from
+    /// selection to avoid repeated 401 failures.
+    fn has_api_key(&self, channel_id: &str) -> bool {
+        // Runtime override from admin API takes precedence
+        if let Some(key) = self.channel_api_keys.get(channel_id) {
+            return !key.expose_secret().is_empty();
+        }
+        // Check the key loaded from storage at startup
+        self.channels
+            .load()
+            .iter()
+            .any(|ch| ch.channel_id == channel_id && !ch.api_key.expose_secret().is_empty())
     }
 
     fn is_healthy(&self, channel_id: &str) -> bool {
@@ -1200,5 +1235,122 @@ mod tests {
             },
         );
         assert!(mw.is_healthy("ch1"));
+    }
+
+    // ── API key filtering ───────────────────────────────────────
+
+    fn make_channel_with_key(
+        id: &str,
+        api_key: &str,
+        protocols: Vec<ProtocolEntry>,
+        mappings: Vec<ResolvedMapping>,
+    ) -> ResolvedChannel {
+        ResolvedChannel {
+            channel_id: id.into(),
+            channel_name: id.into(),
+            api_key: secrecy::SecretString::from(api_key),
+            protocols,
+            enabled: true,
+            force_protocol: None,
+            priority: 10,
+            mappings,
+        }
+    }
+
+    #[test]
+    fn test_channel_with_empty_api_key_is_skipped() {
+        let mw = make_middleware(vec![
+            make_channel_with_key(
+                "no-key",
+                "",
+                make_protocols(ApiFormat::AnthropicMessages, "https://no-key.example.com"),
+                vec![make_mapping_metered("claude-sonnet", "claude-sonnet-v1")],
+            ),
+            make_channel_with_key(
+                "has-key",
+                "sk-valid",
+                make_protocols(ApiFormat::AnthropicMessages, "https://has-key.example.com"),
+                vec![make_mapping_metered("claude-sonnet", "claude-sonnet-v2")],
+            ),
+        ]);
+
+        let channels = mw.channels.load();
+        let candidates = ModelRouterMiddleware::find_candidates(&channels, "claude-sonnet");
+        assert_eq!(candidates.len(), 2);
+        let (ch, _m) = mw.select_channel(&candidates, "claude-sonnet").unwrap();
+        assert_eq!(ch.channel_id, "has-key", "should skip channel with empty API key");
+    }
+
+    #[test]
+    fn test_all_channels_empty_key_returns_error() {
+        let mw = make_middleware(vec![make_channel_with_key(
+            "no-key-1",
+            "",
+            make_protocols(ApiFormat::AnthropicMessages, "https://no1.example.com"),
+            vec![make_mapping_metered("claude-sonnet", "claude-sonnet-v1")],
+        )]);
+
+        let channels = mw.channels.load();
+        let candidates = ModelRouterMiddleware::find_candidates(&channels, "claude-sonnet");
+        let err = mw.select_channel(&candidates, "claude-sonnet").unwrap_err();
+        assert!(
+            matches!(err, ProxyError::ChannelSelection { .. }),
+            "should error when no channel has a valid API key"
+        );
+    }
+
+    #[test]
+    fn test_has_api_key_runtime_override() {
+        let mw = make_middleware(vec![make_channel_with_key(
+            "no-key-stored",
+            "",
+            make_protocols(ApiFormat::AnthropicMessages, "https://no-key.example.com"),
+            vec![make_mapping_metered("claude-sonnet", "claude-sonnet-v1")],
+        )]);
+
+        // Without override: should be excluded
+        assert!(!mw.has_api_key("no-key-stored"));
+
+        // With runtime override: should be available
+        mw.channel_api_keys
+            .insert("no-key-stored".into(), secrecy::SecretString::from("sk-override"));
+        assert!(mw.has_api_key("no-key-stored"));
+    }
+
+    #[test]
+    fn test_empty_key_skipped_in_fallback_phase() {
+        // All channels unhealthy but "has-key" past cooldown, "no-key" also past cooldown
+        let mw = make_middleware(vec![
+            make_channel_with_key(
+                "no-key",
+                "",
+                make_protocols(ApiFormat::AnthropicMessages, "https://no-key.example.com"),
+                vec![make_mapping_metered("claude-sonnet", "claude-sonnet-v1")],
+            ),
+            make_channel_with_key(
+                "has-key",
+                "sk-valid",
+                make_protocols(ApiFormat::AnthropicMessages, "https://has-key.example.com"),
+                vec![make_mapping_metered("claude-sonnet", "claude-sonnet-v2")],
+            ),
+        ]);
+
+        // Mark both unhealthy (past cooldown: 61s ago)
+        for ch_id in ["no-key", "has-key"] {
+            mw.health.insert(
+                ch_id.to_owned(),
+                ChannelState {
+                    health: ChannelHealth::Unhealthy,
+                    consecutive_failures: 1,
+                    failed_at: Some(std::time::Instant::now() - Duration::from_secs(61)),
+                },
+            );
+        }
+
+        let channels = mw.channels.load();
+        let candidates = ModelRouterMiddleware::find_candidates(&channels, "claude-sonnet");
+        // Fallback should skip "no-key" and pick "has-key"
+        let (ch, _m) = mw.select_channel(&candidates, "claude-sonnet").unwrap();
+        assert_eq!(ch.channel_id, "has-key", "fallback should skip empty-key channel");
     }
 }
