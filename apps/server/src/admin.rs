@@ -107,6 +107,13 @@ pub fn admin_routes(
         .route("/admin/model-mappings", post(create_model_mapping))
         .route("/admin/model-mappings/{id}", put(update_model_mapping))
         .route("/admin/model-mappings/{id}", delete(delete_model_mapping))
+        // Model aliases
+        .route("/admin/model-aliases", get(list_model_aliases))
+        .route("/admin/model-aliases", post(create_model_alias))
+        .route(
+            "/admin/model-aliases/{id}",
+            delete(delete_model_alias_handler),
+        )
         // Available Channels (for token-fleet-switch direct-connect mode)
         .route(
             "/admin/available-channels",
@@ -179,6 +186,9 @@ struct CostRecordsQuery {
     days: Option<u32>,
     limit: Option<u32>,
     offset: Option<u32>,
+    /// Local timezone offset in minutes east of UTC (e.g. `480` for UTC+8).
+    #[serde(default)]
+    tz_offset: Option<i32>,
 }
 
 /// Wire result type.
@@ -429,11 +439,7 @@ async fn query_cost_records(
 ) -> ApiResult<Vec<CostRecord>> {
     let time_range = query.days.map(|days| {
         let now = chrono::Utc::now();
-        TimeRange {
-            start: (now - chrono::Duration::days(i64::from(days))).timestamp(),
-            end: now.timestamp(),
-            project: None,
-        }
+        compute_time_range(now, days, query.tz_offset, None)
     });
     let filter = CostFilter {
         project_path: query.project,
@@ -492,11 +498,14 @@ async fn list_model_mappings(
 async fn admin_health(State(state): State<AdminState>) -> ApiResult<serde_json::Value> {
     let healthy = state.storage.health_check().await.unwrap_or(false);
     let channels = state.storage.list_channels(None).await.unwrap_or_default();
-    let healthy_channels = channels
-        .iter()
-        .filter(|c| c.enabled && c.health_status == "Healthy")
-        .count() as u32;
-    let total_channels = channels.len() as u32;
+    let healthy_channels = u32::try_from(
+        channels
+            .iter()
+            .filter(|c| c.enabled && c.health_status == "Healthy")
+            .count(),
+    )
+    .unwrap_or(u32::MAX);
+    let total_channels = u32::try_from(channels.len()).unwrap_or(u32::MAX);
     Ok(Json(serde_json::json!({
         "healthy": healthy,
         "healthyChannels": healthy_channels,
@@ -653,6 +662,41 @@ async fn delete_model_mapping(
     Ok(Json(serde_json::json!({"deleted": true})))
 }
 
+// ── Model Alias ────────────────────────────────────────────────────────────
+
+async fn list_model_aliases(
+    State(state): State<AdminState>,
+) -> ApiResult<Vec<agent_proxy_rust_storage::ModelAlias>> {
+    let aliases = state.storage.list_model_aliases().await?;
+    Ok(Json(aliases))
+}
+
+async fn create_model_alias(
+    State(state): State<AdminState>,
+    Json(request): Json<agent_proxy_rust_storage::ModelAliasRequest>,
+) -> ApiResult<agent_proxy_rust_storage::ModelAlias> {
+    let alias = state.storage.upsert_model_alias(&request).await?;
+    Ok(Json(alias))
+}
+
+async fn delete_model_alias_handler(
+    State(state): State<AdminState>,
+    Path(id): Path<i64>,
+) -> ApiResult<serde_json::Value> {
+    state
+        .storage
+        .delete_model_alias(id)
+        .await
+        .map_err(|e| match &e {
+            StorageError::NotFound(_) => AppError {
+                status: StatusCode::NOT_FOUND,
+                message: format!("alias not found: {id}"),
+            },
+            _ => AppError::from(e),
+        })?;
+    Ok(Json(serde_json::json!({"deleted": true})))
+}
+
 // ── Available Channels ─────────────────────────────────────────────────────
 
 /// Lists enabled channels with their bound models.
@@ -691,10 +735,58 @@ struct CostReportQuery {
     days: u32,
     #[serde(default)]
     group_by: Option<String>,
+    /// Local timezone offset in minutes east of UTC (e.g. `480` for UTC+8).
+    /// When provided, `days` is interpreted as calendar days in that timezone
+    /// instead of a rolling 24-hour window from UTC now.
+    #[serde(default)]
+    tz_offset: Option<i32>,
 }
 
 fn default_days() -> u32 {
     30
+}
+
+/// Computes a [`TimeRange`] for the given `days` count, optionally anchored to
+/// calendar-day boundaries in the caller's local timezone.
+///
+/// When `tz_offset` is `Some(offset_minutes)`, `days = 1` means "today 00:00
+/// local-time → now", `days = 2` means "yesterday 00:00 local-time → now",
+/// etc.  When `None`, the range is a rolling `days × 24 h` window ending at
+/// `now` (the previous behaviour, kept for backward compatibility).
+fn compute_time_range(
+    now: chrono::DateTime<chrono::Utc>,
+    days: u32,
+    tz_offset: Option<i32>,
+    project: Option<String>,
+) -> TimeRange {
+    let end = now.timestamp();
+
+    let start = match tz_offset {
+        Some(offset_minutes) => {
+            let clamped = offset_minutes.clamp(-720, 840); // ±12h + a bit
+            // clamped*60 ∈ [-43200, 50400] ⊂ (-86400, 86400), so east_opt always returns Some.
+            // Fall back to the input's own fixed offset (UTC, i.e. 0) if it ever didn't.
+            let utc_fixed = chrono::Offset::fix(now.offset());
+            let offset = chrono::FixedOffset::east_opt(clamped * 60).unwrap_or(utc_fixed);
+            let local_now = now.with_timezone(&offset);
+            // `NaiveTime::MIN` is midnight (00:00:00), which is always valid for any date.
+            let local_today_start = local_now.date_naive().and_time(chrono::NaiveTime::MIN);
+            let days_back = chrono::Duration::days(i64::from(days.saturating_sub(1)));
+            let local_start = local_today_start - days_back;
+            // `local_start` is a naive local-time datetime; convert to UTC by
+            // subtracting the offset (local_minus_utc is in seconds).
+            let utc_start =
+                local_start - chrono::Duration::seconds(i64::from(offset.local_minus_utc()));
+            utc_start.and_utc().timestamp()
+        }
+        None => now.timestamp() - i64::from(days) * 86_400,
+    };
+
+    TimeRange {
+        start,
+        end,
+        project,
+    }
 }
 
 /// Returns an aggregated project cost report.
@@ -703,11 +795,7 @@ async fn cost_report(
     Query(query): Query<CostReportQuery>,
 ) -> ApiResult<Vec<CostAggregate>> {
     let now = chrono::Utc::now();
-    let range = TimeRange {
-        start: (now - chrono::Duration::days(i64::from(query.days))).timestamp(),
-        end: now.timestamp(),
-        project: None,
-    };
+    let range = compute_time_range(now, query.days, query.tz_offset, None);
 
     let group_by = if query.project.is_some() {
         CostGroupBy::ProjectModelMonth
@@ -731,11 +819,7 @@ async fn cost_savings(
     Query(query): Query<CostReportQuery>,
 ) -> ApiResult<CompressionSavingsReport> {
     let now = chrono::Utc::now();
-    let range = TimeRange {
-        start: (now - chrono::Duration::days(i64::from(query.days))).timestamp(),
-        end: now.timestamp(),
-        project: None,
-    };
+    let range = compute_time_range(now, query.days, query.tz_offset, query.project.clone());
 
     let filter = CostFilter {
         project_path: query.project,
@@ -763,21 +847,14 @@ async fn cost_trend(
     Query(query): Query<CostReportQuery>,
 ) -> ApiResult<Vec<CostAggregate>> {
     let now = chrono::Utc::now();
-    let range = TimeRange {
-        start: (now - chrono::Duration::days(i64::from(query.days))).timestamp(),
-        end: now.timestamp(),
-        project: query.project.clone(),
-    };
+    let range = compute_time_range(now, query.days, query.tz_offset, query.project.clone());
 
     let group_by = match query.group_by.as_deref() {
         Some("daily") => CostGroupBy::Daily,
         _ => CostGroupBy::Hourly,
     };
 
-    let results = state
-        .storage
-        .aggregate_costs(group_by, range)
-        .await?;
+    let results = state.storage.aggregate_costs(group_by, range).await?;
 
     Ok(Json(results))
 }
@@ -1023,5 +1100,86 @@ mod tests {
         // After seed_init, there should be some projects (or empty array)
         // The key test: endpoint returns 200 and valid JSON array
         assert!(projects.is_empty() || !projects.is_empty()); // tautology: just verifying it's a valid array
+    }
+
+    // ── compute_time_range tests ─────────────────────────────────────────
+
+    mod time_range {
+        use super::super::compute_time_range;
+        use chrono::{TimeZone, Utc};
+
+        #[test]
+        fn test_no_tz_offset_uses_rolling_window() {
+            // 2026-06-10T12:30:00Z, days=1 → start = 2026-06-09T12:30:00Z
+            let now = Utc.with_ymd_and_hms(2026, 6, 10, 12, 30, 0).unwrap();
+            let range = compute_time_range(now, 1, None, None);
+            let expected_start = Utc
+                .with_ymd_and_hms(2026, 6, 9, 12, 30, 0)
+                .unwrap()
+                .timestamp();
+            assert_eq!(range.start, expected_start);
+            assert_eq!(range.end, now.timestamp());
+            assert!(range.project.is_none());
+        }
+
+        #[test]
+        fn test_tz_offset_beijing_today() {
+            // now = 2026-06-10T02:00:00Z = 2026-06-10T10:00:00+08 (Beijing)
+            // days=1 → start = 2026-06-10T00:00:00+08 = 2026-06-09T16:00:00Z
+            let now = Utc.with_ymd_and_hms(2026, 6, 10, 2, 0, 0).unwrap();
+            let range = compute_time_range(now, 1, Some(480), None);
+            let expected_start = Utc
+                .with_ymd_and_hms(2026, 6, 9, 16, 0, 0)
+                .unwrap()
+                .timestamp();
+            assert_eq!(range.start, expected_start);
+            assert_eq!(range.end, now.timestamp());
+        }
+
+        #[test]
+        fn test_tz_offset_beijing_two_days() {
+            // now = 2026-06-10T02:00:00Z = 2026-06-10T10:00:00+08
+            // days=2 → start = 2026-06-09T00:00:00+08 = 2026-06-08T16:00:00Z
+            let now = Utc.with_ymd_and_hms(2026, 6, 10, 2, 0, 0).unwrap();
+            let range = compute_time_range(now, 2, Some(480), None);
+            let expected_start = Utc
+                .with_ymd_and_hms(2026, 6, 8, 16, 0, 0)
+                .unwrap()
+                .timestamp();
+            assert_eq!(range.start, expected_start);
+        }
+
+        #[test]
+        fn test_tz_offset_preserves_project_filter() {
+            let now = Utc.with_ymd_and_hms(2026, 6, 10, 12, 0, 0).unwrap();
+            let range = compute_time_range(now, 1, Some(480), Some("/my-project".into()));
+            assert_eq!(range.project.as_deref(), Some("/my-project"));
+        }
+
+        #[test]
+        fn test_tz_offset_negative_west_of_utc() {
+            // now = 2026-06-10T03:00:00Z = 2026-06-09T22:00:00-05 (EST-ish)
+            // days=1 → start = 2026-06-09T00:00:00-05 = 2026-06-09T05:00:00Z
+            let now = Utc.with_ymd_and_hms(2026, 6, 10, 3, 0, 0).unwrap();
+            let range = compute_time_range(now, 1, Some(-300), None);
+            let expected_start = Utc
+                .with_ymd_and_hms(2026, 6, 9, 5, 0, 0)
+                .unwrap()
+                .timestamp();
+            assert_eq!(range.start, expected_start);
+        }
+
+        #[test]
+        fn test_days_zero_means_only_current_day() {
+            // now = 2026-06-10T10:00:00+08, days=0 → start = today 00:00+08
+            // (days.saturating_sub(1) = 0, so no days_back)
+            let now = Utc.with_ymd_and_hms(2026, 6, 10, 2, 0, 0).unwrap();
+            let range = compute_time_range(now, 0, Some(480), None);
+            let expected_start = Utc
+                .with_ymd_and_hms(2026, 6, 9, 16, 0, 0)
+                .unwrap()
+                .timestamp();
+            assert_eq!(range.start, expected_start);
+        }
     }
 }

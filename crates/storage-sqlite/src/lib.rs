@@ -10,19 +10,20 @@ use std::fmt::Write;
 
 use agent_proxy_rust_storage::{
     AvailableChannelInfo, AvailableModelInfo, Channel, CostAggregate, CostFilter, CostGroupBy,
-    CostRecord, Model, ModelMapping, Provider, SeedManager, SeedStatus, Storage, StorageError,
-    SubscriptionFee, SwitchLog, TimeRange,
+    CostRecord, Model, ModelAlias, ModelAliasRequest, ModelMapping, Provider, SeedManager,
+    SeedStatus, Storage, StorageError, SubscriptionFee, SwitchLog, TimeRange,
 };
 use async_trait::async_trait;
 use r2d2::Pool;
 use r2d2_sqlite::SqliteConnectionManager;
-use rusqlite::params;
+use rusqlite::{OptionalExtension, params};
 use secrecy::{ExposeSecret, SecretString};
 use tracing::debug;
 
 mod seed;
 
 const MIGRATION_V1: &str = include_str!("../migrations/001_init.sql");
+const MIGRATION_V2: &str = include_str!("../migrations/002_model_aliases.sql");
 
 /// SQLite-backed storage implementation.
 ///
@@ -79,17 +80,25 @@ impl SqliteStorage {
     }
 
     fn row_to_channel(row: &rusqlite::Row) -> rusqlite::Result<Channel> {
+        let api_key_str: String = row.get(2)?;
+        let health_status: String = row.get(9)?;
+        // Override: channels without API key are always Unavailable.
+        let effective_health = if api_key_str.is_empty() {
+            "Unavailable".to_string()
+        } else {
+            health_status
+        };
         Ok(Channel {
             id: row.get(0)?,
             name: row.get(1)?,
-            api_key: SecretString::new(row.get::<_, String>(2)?.into_boxed_str()),
+            api_key: SecretString::new(api_key_str.into_boxed_str()),
             protocol: row.get(3)?,
             protocols: row.get::<_, String>(4).unwrap_or_default(),
             is_builtin: row.get(5)?,
             enabled: row.get(6)?,
             created_at: row.get(7)?,
             updated_at: row.get(8)?,
-            health_status: row.get(9)?,
+            health_status: effective_health,
             cooldown_until: row.get(10)?,
             consecutive_failures: row.get(11)?,
             billing_type: row.get(12)?,
@@ -844,6 +853,154 @@ impl Storage for SqliteStorage {
         .map_err(|e| StorageError::Backend(format!("join error: {e}")))?
     }
 
+    // ── Model Alias ────────────────────────────────────────────────────
+
+    async fn list_model_aliases(&self) -> Result<Vec<ModelAlias>, StorageError> {
+        let pool = self.get_pool();
+        tokio::task::spawn_blocking(move || {
+            let conn = pool
+                .get()
+                .map_err(|e| StorageError::Connection(e.to_string()))?;
+            let mut stmt = conn
+                .prepare(
+                    "SELECT id, alias_name, target_model, enabled, created_at, updated_at \
+                     FROM model_aliases ORDER BY alias_name",
+                )
+                .map_err(|e| StorageError::Backend(e.to_string()))?;
+            let rows = stmt
+                .query_map([], |row| {
+                    Ok(ModelAlias {
+                        id: row.get(0)?,
+                        alias_name: row.get(1)?,
+                        target_model: row.get(2)?,
+                        enabled: row.get::<_, i32>(3)? != 0,
+                        created_at: row.get(4)?,
+                        updated_at: row.get(5)?,
+                    })
+                })
+                .map_err(|e| StorageError::Backend(e.to_string()))?;
+            let mut aliases = Vec::new();
+            for row in rows {
+                aliases.push(row.map_err(|e| StorageError::Backend(e.to_string()))?);
+            }
+            Ok(aliases)
+        })
+        .await
+        .map_err(|e| StorageError::Backend(format!("join error: {e}")))?
+    }
+
+    async fn get_model_alias_target(
+        &self,
+        alias_name: &str,
+    ) -> Result<Option<String>, StorageError> {
+        let alias_name = alias_name.to_string();
+        let pool = self.get_pool();
+        tokio::task::spawn_blocking(move || {
+            let conn = pool
+                .get()
+                .map_err(|e| StorageError::Connection(e.to_string()))?;
+            let mut stmt = conn
+                .prepare(
+                    "SELECT target_model FROM model_aliases \
+                     WHERE alias_name = ?1 AND enabled = 1",
+                )
+                .map_err(|e| StorageError::Backend(e.to_string()))?;
+            let result = stmt
+                .query_row(params![alias_name], |row| row.get::<_, String>(0))
+                .optional()
+                .map_err(|e| StorageError::Backend(e.to_string()))?;
+            Ok(result)
+        })
+        .await
+        .map_err(|e| StorageError::Backend(format!("join error: {e}")))?
+    }
+
+    async fn upsert_model_alias(
+        &self,
+        request: &ModelAliasRequest,
+    ) -> Result<ModelAlias, StorageError> {
+        let alias_name = request.alias_name.clone();
+        let target_model = request.target_model.clone();
+        let enabled = request.enabled;
+        let pool = self.get_pool();
+
+        tokio::task::spawn_blocking(move || {
+            let conn = pool
+                .get()
+                .map_err(|e| StorageError::Connection(e.to_string()))?;
+            conn.execute(
+                "INSERT INTO model_aliases (alias_name, target_model, enabled, created_at, updated_at)
+                 VALUES (?1, ?2, ?3, datetime('now'), datetime('now'))
+                 ON CONFLICT(alias_name) DO UPDATE SET
+                   target_model = excluded.target_model,
+                   enabled = excluded.enabled,
+                   updated_at = datetime('now')",
+                params![alias_name, target_model, i32::from(enabled)],
+            )
+            .map_err(|e| StorageError::Backend(e.to_string()))?;
+
+            // Fetch the inserted/updated row
+            let mut stmt = conn
+                .prepare(
+                    "SELECT id, alias_name, target_model, enabled, created_at, updated_at \
+                     FROM model_aliases WHERE alias_name = ?1",
+                )
+                .map_err(|e| StorageError::Backend(e.to_string()))?;
+            stmt.query_row(params![alias_name], |row| {
+                Ok(ModelAlias {
+                    id: row.get(0)?,
+                    alias_name: row.get(1)?,
+                    target_model: row.get(2)?,
+                    enabled: row.get::<_, i32>(3)? != 0,
+                    created_at: row.get(4)?,
+                    updated_at: row.get(5)?,
+                })
+            })
+            .map_err(|e| StorageError::Backend(e.to_string()))
+        })
+        .await
+        .map_err(|e| StorageError::Backend(format!("join error: {e}")))?
+    }
+
+    async fn delete_model_alias(&self, id: i64) -> Result<(), StorageError> {
+        let pool = self.get_pool();
+        tokio::task::spawn_blocking(move || {
+            let conn = pool
+                .get()
+                .map_err(|e| StorageError::Connection(e.to_string()))?;
+            let rows = conn
+                .execute("DELETE FROM model_aliases WHERE id = ?1", params![id])
+                .map_err(|e| StorageError::Backend(e.to_string()))?;
+            if rows == 0 {
+                return Err(StorageError::NotFound(format!("alias not found: {id}")));
+            }
+            Ok(())
+        })
+        .await
+        .map_err(|e| StorageError::Backend(format!("join error: {e}")))?
+    }
+
+    async fn set_model_alias_enabled(&self, id: i64, enabled: bool) -> Result<(), StorageError> {
+        let pool = self.get_pool();
+        tokio::task::spawn_blocking(move || {
+            let conn = pool
+                .get()
+                .map_err(|e| StorageError::Connection(e.to_string()))?;
+            let rows = conn
+                .execute(
+                    "UPDATE model_aliases SET enabled = ?1, updated_at = datetime('now') WHERE id = ?2",
+                    params![i32::from(enabled), id],
+                )
+                .map_err(|e| StorageError::Backend(e.to_string()))?;
+            if rows == 0 {
+                return Err(StorageError::NotFound(format!("alias not found: {id}")));
+            }
+            Ok(())
+        })
+        .await
+        .map_err(|e| StorageError::Backend(format!("join error: {e}")))?
+    }
+
     // ── Cost Records ───────────────────────────────────────────────────
 
     async fn insert_cost_record(&self, record: &CostRecord) -> Result<(), StorageError> {
@@ -1067,22 +1224,12 @@ impl Storage for SqliteStorage {
                     "project || '|' || upstream_model || '|' || substr(timestamp, 1, 13)",
                     "project, upstream_model",
                 ),
-                CostGroupBy::Hourly => (
-                    "substr(timestamp, 1, 13)",
-                    "substr(timestamp, 1, 13)",
-                ),
-                CostGroupBy::Daily => (
-                    "substr(timestamp, 1, 10)",
-                    "substr(timestamp, 1, 10)",
-                ),
+                CostGroupBy::Hourly => ("substr(timestamp, 1, 13)", "substr(timestamp, 1, 13)"),
+                CostGroupBy::Daily => ("substr(timestamp, 1, 10)", "substr(timestamp, 1, 10)"),
             };
 
             // Build WHERE clause with optional project filter
-            let project_filter = range
-                .project
-                .as_ref()
-                .map(|_| " AND project = ?3")
-                .unwrap_or("");
+            let project_filter = range.project.as_ref().map_or("", |_| " AND project = ?3");
             let sql = format!(
                 "SELECT {group_key_expr} as group_key,
                         SUM(input_tokens) as total_input_tokens,
@@ -1100,17 +1247,15 @@ impl Storage for SqliteStorage {
                 .prepare(&sql)
                 .map_err(|e| StorageError::Backend(e.to_string()))?;
 
-            let mut params: Vec<Box<dyn rusqlite::types::ToSql>> = vec![
-                Box::new(start_rfc),
-                Box::new(end_rfc),
-            ];
+            let mut params: Vec<Box<dyn rusqlite::types::ToSql>> =
+                vec![Box::new(start_rfc), Box::new(end_rfc)];
             if let Some(ref proj) = range.project {
                 params.push(Box::new(proj.clone()));
             }
 
             let rows = stmt
                 .query_map(
-                    rusqlite::params_from_iter(params.iter().map(|p| p.as_ref())),
+                    rusqlite::params_from_iter(params.iter().map(AsRef::as_ref)),
                     |row| {
                         Ok(CostAggregate {
                             group_key: row.get(0)?,
@@ -1175,7 +1320,7 @@ impl Storage for SqliteStorage {
             let projects: Vec<String> = stmt
                 .query_map([], |row| row.get(0))
                 .map_err(|e| StorageError::Backend(e.to_string()))?
-                .filter_map(|r| r.ok())
+                .filter_map(Result::ok)
                 .collect();
 
             Ok(projects)
@@ -1443,7 +1588,12 @@ impl Storage for SqliteStorage {
                     .map_err(|e| StorageError::Migration(e.to_string()))?;
             }
 
-            conn.pragma_update(None, "user_version", 1)
+            if version < 2 {
+                conn.execute_batch(MIGRATION_V2)
+                    .map_err(|e| StorageError::Migration(e.to_string()))?;
+            }
+
+            conn.pragma_update(None, "user_version", 2)
                 .map_err(|e| StorageError::Migration(e.to_string()))?;
 
             Ok(())
@@ -1804,5 +1954,135 @@ mod tests {
                 "all models should belong to deepseek"
             );
         }
+    }
+
+    // ── Model Alias tests ────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn test_upsert_model_alias_creates_new() {
+        let storage = setup_in_memory_async().await;
+        let alias = storage
+            .upsert_model_alias(&ModelAliasRequest {
+                alias_name: "gpt-5.5".into(),
+                target_model: "qwen3.7-plus".into(),
+                enabled: true,
+            })
+            .await
+            .unwrap();
+        assert_eq!(alias.alias_name, "gpt-5.5");
+        assert_eq!(alias.target_model, "qwen3.7-plus");
+        assert!(alias.enabled);
+    }
+
+    #[tokio::test]
+    async fn test_upsert_model_alias_updates_existing() {
+        let storage = setup_in_memory_async().await;
+        storage
+            .upsert_model_alias(&ModelAliasRequest {
+                alias_name: "gpt-5.5".into(),
+                target_model: "qwen3.7-plus".into(),
+                enabled: true,
+            })
+            .await
+            .unwrap();
+        let updated = storage
+            .upsert_model_alias(&ModelAliasRequest {
+                alias_name: "gpt-5.5".into(),
+                target_model: "deepseek-v4-pro".into(),
+                enabled: false,
+            })
+            .await
+            .unwrap();
+        assert_eq!(updated.target_model, "deepseek-v4-pro");
+        assert!(!updated.enabled);
+    }
+
+    #[tokio::test]
+    async fn test_get_model_alias_target_returns_correct_model() {
+        let storage = setup_in_memory_async().await;
+        storage
+            .upsert_model_alias(&ModelAliasRequest {
+                alias_name: "gpt-4o".into(),
+                target_model: "glm-5.1".into(),
+                enabled: true,
+            })
+            .await
+            .unwrap();
+        let target = storage.get_model_alias_target("gpt-4o").await.unwrap();
+        assert_eq!(target, Some("glm-5.1".into()));
+    }
+
+    #[tokio::test]
+    async fn test_get_model_alias_target_returns_none_for_disabled() {
+        let storage = setup_in_memory_async().await;
+        storage
+            .upsert_model_alias(&ModelAliasRequest {
+                alias_name: "gpt-4o".into(),
+                target_model: "glm-5.1".into(),
+                enabled: false,
+            })
+            .await
+            .unwrap();
+        let target = storage.get_model_alias_target("gpt-4o").await.unwrap();
+        assert_eq!(target, None, "disabled alias should return None");
+    }
+
+    #[tokio::test]
+    async fn test_list_model_aliases() {
+        let storage = setup_in_memory_async().await;
+        storage
+            .upsert_model_alias(&ModelAliasRequest {
+                alias_name: "gpt-5.5".into(),
+                target_model: "qwen3.7-plus".into(),
+                enabled: true,
+            })
+            .await
+            .unwrap();
+        storage
+            .upsert_model_alias(&ModelAliasRequest {
+                alias_name: "gpt-4o".into(),
+                target_model: "deepseek-v4-pro".into(),
+                enabled: true,
+            })
+            .await
+            .unwrap();
+        let aliases = storage.list_model_aliases().await.unwrap();
+        assert_eq!(aliases.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn test_delete_model_alias() {
+        let storage = setup_in_memory_async().await;
+        let alias = storage
+            .upsert_model_alias(&ModelAliasRequest {
+                alias_name: "gpt-5.5".into(),
+                target_model: "qwen3.7-plus".into(),
+                enabled: true,
+            })
+            .await
+            .unwrap();
+        storage.delete_model_alias(alias.id).await.unwrap();
+        let target = storage.get_model_alias_target("gpt-5.5").await.unwrap();
+        assert_eq!(target, None);
+    }
+
+    #[tokio::test]
+    async fn test_set_model_alias_enabled() {
+        let storage = setup_in_memory_async().await;
+        let alias = storage
+            .upsert_model_alias(&ModelAliasRequest {
+                alias_name: "gpt-5.5".into(),
+                target_model: "qwen3.7-plus".into(),
+                enabled: true,
+            })
+            .await
+            .unwrap();
+        assert!(alias.enabled);
+        storage
+            .set_model_alias_enabled(alias.id, false)
+            .await
+            .unwrap();
+        let target = storage.get_model_alias_target("gpt-5.5").await.unwrap();
+        assert_eq!(target, None, "disabled alias should not be returned");
     }
 }

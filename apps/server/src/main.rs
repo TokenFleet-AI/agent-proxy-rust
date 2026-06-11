@@ -7,6 +7,7 @@ use std::{path::PathBuf, sync::Arc};
 
 use agent_proxy_rust_bridge::BridgeMiddleware;
 use agent_proxy_rust_compress::CompressMiddleware;
+use agent_proxy_rust_core::middleware::ModelAliasMiddleware;
 use agent_proxy_rust_core::{AgentProxyBuilder, ProxyConfig};
 use agent_proxy_rust_cost::CostMiddleware;
 use agent_proxy_rust_model_router::ModelRouterMiddleware;
@@ -87,10 +88,20 @@ async fn main() -> Result<()> {
 
     let cost_middleware = Arc::new(CostMiddleware::new(storage.clone(), "unknown".to_string()));
 
+    // Build model alias map from DB (only enabled aliases)
+    let aliases = storage.list_model_aliases().await.unwrap_or_default();
+    let alias_map: std::collections::HashMap<String, String> = aliases
+        .into_iter()
+        .filter(|a| a.enabled)
+        .map(|a| (a.alias_name, a.target_model))
+        .collect();
+    let model_alias = ModelAliasMiddleware::new(alias_map);
+
     let proxy = AgentProxyBuilder::default()
         .config(config)
         .cost_recorder(cost_middleware)
         .middleware(compress)
+        .middleware(model_alias)
         .middleware(model_router)
         .middleware(BridgeMiddleware::new())
         .build()?

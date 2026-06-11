@@ -445,6 +445,44 @@ pub struct ProtocolEntry {
     pub rewrite_path: Option<String>,
 }
 
+/// Model alias mapping for translating official model names to custom models.
+///
+/// Used by the `ModelAliasMiddleware` to intercept requests with official model names
+/// (e.g., `gpt-5.5`) and map them to custom models (e.g., `qwen3.7-plus`) before routing.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ModelAlias {
+    /// Unique identifier for this alias mapping.
+    pub id: i64,
+    /// Official model name (alias), e.g., "gpt-5.5".
+    pub alias_name: String,
+    /// Custom model name (target), e.g., "qwen3.7-plus".
+    pub target_model: String,
+    /// Whether this alias mapping is enabled.
+    pub enabled: bool,
+    /// When this alias was created (RFC 3339).
+    pub created_at: String,
+    /// When this alias was last updated (RFC 3339).
+    pub updated_at: String,
+}
+
+/// Request body for creating or updating a model alias.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ModelAliasRequest {
+    /// Official model name (alias), e.g., "gpt-5.5".
+    pub alias_name: String,
+    /// Custom model name (target), e.g., "qwen3.7-plus".
+    pub target_model: String,
+    /// Whether this alias mapping is enabled (default: true).
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+}
+
+fn default_true() -> bool {
+    true
+}
+
 /// Serializes a [`SecretString`] as its exposed string value.
 fn serialize_secret<S>(secret: &SecretString, serializer: S) -> Result<S::Ok, S::Error>
 where

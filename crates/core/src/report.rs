@@ -248,7 +248,7 @@ pub(crate) fn consume_report(session_id: &str) -> Option<TokenlessAccumulator> {
         return None;
     }
 
-    tracing::info!(
+    tracing::debug!(
         new_lines = breakdown_items.len(),
         total_new_saved = acc.total_saved,
         project_path = ?acc.project_path,

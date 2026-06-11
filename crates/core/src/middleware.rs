@@ -123,6 +123,68 @@ pub trait CostRecorder: Send + Sync + std::fmt::Debug {
     ) -> Result<(), crate::error::ProxyError>;
 }
 
+// ── ModelAliasMiddleware ────────────────────────────────────────────────
+
+use bytes::Bytes;
+use std::collections::HashMap;
+use tracing::info;
+
+/// Middleware that applies model alias mapping before routing.
+#[derive(Debug)]
+pub struct ModelAliasMiddleware {
+    alias_map: HashMap<String, String>,
+}
+
+impl ModelAliasMiddleware {
+    /// Creates a new alias middleware from a map of `alias_name → target_model`.
+    #[must_use]
+    pub fn new(alias_map: HashMap<String, String>) -> Self {
+        Self { alias_map }
+    }
+}
+
+#[async_trait]
+impl ProxyMiddleware for ModelAliasMiddleware {
+    fn name(&self) -> &'static str {
+        "model-alias"
+    }
+
+    async fn on_request(
+        &self,
+        req: &mut crate::types::ProxyRequest,
+        _ctx: &mut crate::types::ConnectionContext,
+    ) -> Result<(), crate::error::ProxyError> {
+        let mut json: serde_json::Value = serde_json::from_slice(&req.body)
+            .map_err(|e| crate::error::ProxyError::BadRequest(format!("invalid JSON body: {e}")))?;
+
+        let original = json
+            .get("model")
+            .and_then(|v| v.as_str())
+            .map(str::to_string);
+
+        if let Some(model) = original
+            && !model.is_empty()
+            && let Some(target) = self.alias_map.get(&model).cloned()
+        {
+            json["model"] = serde_json::Value::String(target.clone());
+            req.body = Bytes::from(
+                serde_json::to_vec(&json)
+                    .map_err(|e| crate::error::ProxyError::Internal(anyhow::anyhow!("{e}")))?,
+            );
+            info!(alias = %model, target = %target, "model alias mapping applied");
+        }
+        Ok(())
+    }
+
+    async fn on_response(
+        &self,
+        _res: &mut crate::types::ProxyResponse,
+        _ctx: &crate::types::ConnectionContext,
+    ) -> Result<(), crate::error::ProxyError> {
+        Ok(())
+    }
+}
+
 #[cfg(test)]
 #[allow(clippy::unwrap_used)]
 mod tests {

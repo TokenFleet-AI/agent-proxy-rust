@@ -202,22 +202,13 @@ impl ModelRouterMiddleware {
             });
         }
 
-        // Pre-populate the in-memory health map: channels without API keys
-        // start as Unhealthy so the router won't select them. Also persist
-        // the status to DB so the Admin API reflects it.
+        // Channels without API keys are naturally skipped by the router
+        // (`has_api_key` check in `select_channel`). No need to simulate
+        // health-check failures — they are simply unavailable.
         let health: Arc<DashMap<String, ChannelState>> = Arc::new(DashMap::new());
         for ch in &channels {
             if ch.api_key.expose_secret().is_empty() {
-                // Mark unhealthy in-memory (3 consecutive failures → Unhealthy + cooldown)
-                health
-                    .entry(ch.channel_id.clone())
-                    .or_default()
-                    .mark_unhealthy();
-                // Persist to DB for admin UI display
-                let _ = storage.record_channel_failure(&ch.channel_id).await;
-                let _ = storage.record_channel_failure(&ch.channel_id).await;
-                let _ = storage.record_channel_failure(&ch.channel_id).await;
-                tracing::info!(channel=%ch.channel_id, name=%ch.channel_name, "no API key — Unavailable");
+                tracing::info!(channel=%ch.channel_id, name=%ch.channel_name, "no API key — skipped");
             }
         }
 
@@ -1278,7 +1269,10 @@ mod tests {
         let candidates = ModelRouterMiddleware::find_candidates(&channels, "claude-sonnet");
         assert_eq!(candidates.len(), 2);
         let (ch, _m) = mw.select_channel(&candidates, "claude-sonnet").unwrap();
-        assert_eq!(ch.channel_id, "has-key", "should skip channel with empty API key");
+        assert_eq!(
+            ch.channel_id, "has-key",
+            "should skip channel with empty API key"
+        );
     }
 
     #[test]
@@ -1312,8 +1306,10 @@ mod tests {
         assert!(!mw.has_api_key("no-key-stored"));
 
         // With runtime override: should be available
-        mw.channel_api_keys
-            .insert("no-key-stored".into(), secrecy::SecretString::from("sk-override"));
+        mw.channel_api_keys.insert(
+            "no-key-stored".into(),
+            secrecy::SecretString::from("sk-override"),
+        );
         assert!(mw.has_api_key("no-key-stored"));
     }
 
@@ -1351,6 +1347,9 @@ mod tests {
         let candidates = ModelRouterMiddleware::find_candidates(&channels, "claude-sonnet");
         // Fallback should skip "no-key" and pick "has-key"
         let (ch, _m) = mw.select_channel(&candidates, "claude-sonnet").unwrap();
-        assert_eq!(ch.channel_id, "has-key", "fallback should skip empty-key channel");
+        assert_eq!(
+            ch.channel_id, "has-key",
+            "fallback should skip empty-key channel"
+        );
     }
 }

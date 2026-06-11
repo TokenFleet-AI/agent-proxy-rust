@@ -17,9 +17,9 @@ pub use error::StorageError;
 use secrecy::SecretString;
 pub use types::{
     AvailableChannelInfo, AvailableModelInfo, Channel, CompressionSavingsReport, CostAggregate,
-    CostFilter, CostGroupBy, CostRecord, Model, ModelMapping, ProtocolEntry, Provider,
-    SeedEntryStatus, SeedManifest, SeedManifestEntry, SeedStatus, SubscriptionFee, SwitchLog,
-    TimeRange,
+    CostFilter, CostGroupBy, CostRecord, Model, ModelAlias, ModelAliasRequest, ModelMapping,
+    ProtocolEntry, Provider, SeedEntryStatus, SeedManifest, SeedManifestEntry, SeedStatus,
+    SubscriptionFee, SwitchLog, TimeRange,
 };
 
 /// Backend-agnostic storage for providers, models, channels, and cost records.
@@ -101,6 +101,29 @@ pub trait Storage: Send + Sync + Debug {
 
     /// List all model mappings.
     async fn list_all_mappings(&self) -> Result<Vec<ModelMapping>, StorageError>;
+
+    // ── Model Alias ──────────────────────────────────────────
+
+    /// List all model alias mappings.
+    async fn list_model_aliases(&self) -> Result<Vec<ModelAlias>, StorageError>;
+
+    /// Get the target model for an alias name (if enabled).
+    async fn get_model_alias_target(
+        &self,
+        alias_name: &str,
+    ) -> Result<Option<String>, StorageError>;
+
+    /// Create or update a model alias mapping.
+    async fn upsert_model_alias(
+        &self,
+        request: &ModelAliasRequest,
+    ) -> Result<ModelAlias, StorageError>;
+
+    /// Delete a model alias mapping by ID.
+    async fn delete_model_alias(&self, id: i64) -> Result<(), StorageError>;
+
+    /// Enable or disable a model alias mapping.
+    async fn set_model_alias_enabled(&self, id: i64, enabled: bool) -> Result<(), StorageError>;
 
     // ── Cost Records ────────────────────────────────────────
 

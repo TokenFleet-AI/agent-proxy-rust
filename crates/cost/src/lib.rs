@@ -293,7 +293,10 @@ fn extract_openai_chat(body: &serde_json::Value) -> Usage {
     // Or use input/output as alternative field names
     let (input, output) = if prompt_tokens > 0 || completion_tokens > 0 {
         (prompt_tokens, completion_tokens)
-    } else if let Some(total) = usage.get("total_tokens").and_then(serde_json::Value::as_u64) {
+    } else if let Some(total) = usage
+        .get("total_tokens")
+        .and_then(serde_json::Value::as_u64)
+    {
         // Fallback: split total as 50/50 (conservative estimate)
         (total / 2, total / 2)
     } else {

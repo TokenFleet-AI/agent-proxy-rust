@@ -366,7 +366,7 @@ async fn handle_proxy_request(
         })
         .map(|(k, v)| format!("{}={}", k.as_str(), v.to_str().unwrap_or("<binary>")))
         .collect();
-    tracing::info!(
+    tracing::debug!(
         request_id = ctx.request_id,
         session_id = ?session_id,
         project_path = ?project_path,
@@ -462,9 +462,10 @@ async fn handle_non_streaming_response(
     };
 
     let body_text = String::from_utf8_lossy(&body_bytes);
-    tracing::warn!(
+    tracing::debug!(
         request_id = ctx.request_id,
         upstream_status = %status,
+        body_len = body_text.len(),
         upstream_body = %body_text,
         target_protocol = ?ctx.target_protocol,
         channel = ?ctx.get::<crate::types::ChannelConfig>(crate::extensions::EXT_SELECTED_CHANNEL).map(|ch| ch.name.clone()),
@@ -519,9 +520,10 @@ async fn handle_streaming_response(
     };
 
     let body_text = String::from_utf8_lossy(&body_bytes);
-    tracing::warn!(
+    tracing::debug!(
         request_id = ctx.request_id,
         upstream_status = %status,
+        body_len = body_text.len(),
         upstream_body = %body_text,
         target_protocol = ?ctx.target_protocol,
         channel = ?ctx.get::<crate::types::ChannelConfig>(crate::extensions::EXT_SELECTED_CHANNEL).map(|ch| ch.name.clone()),
