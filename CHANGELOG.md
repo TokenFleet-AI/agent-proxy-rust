@@ -3,11 +3,26 @@
 All notable changes to this project will be documented in this file. See [conventional commits](https://www.conventionalcommits.org/) for commit guidelines.
 
 ---
+## [1.0.1](https://github.com/compare/v1.0.0..v1.0.1) - 2026-06-12
+
+### Documentation
+
+- comprehensive documentation overhaul - ([18b54f5](https://github.com/commit/18b54f5b7d011346dea4c7e5ea2f1e15997f575c)) - baoyx
+
+### Miscellaneous Chores
+
+- **(release)** configure cargo-release with single workspace tag - ([2d7d24a](https://github.com/commit/2d7d24a2e91f70ec6d442c146d01977fd24114d2)) - baoyx
+
+---
 ## [1.0.0](https://github.com/compare/seed-v1..v1.0.0) - 2026-06-12
 
 ### Bug Fixes
 
 - **(cost)** populate rtk_saved_tokens and response_saved_tokens from tokenless reports - ([57854c6](https://github.com/commit/57854c6ce3f1dfd3a25eb4bdfa19c66ad1c2ab46)) - baoyx
+
+### Documentation
+
+- finalize CHANGELOG for v1.0.0 - ([f5d18ef](https://github.com/commit/f5d18ef5348835959925b09b941bfdd4f9a4a094)) - baoyx
 
 ### Features
 
