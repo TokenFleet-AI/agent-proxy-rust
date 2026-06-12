@@ -33,7 +33,7 @@ agent-proxy-rust-bridge = { path = "crates/bridge" }
 agent-proxy-rust-compress = { path = "crates/compress" }
 
 # External protocol translation
-llm-bridge-core = { path = "../llm-bridge-rust/crates/core" }
+llm-bridge-core = "0.2.6"
 
 [workspace.lints.rust]
 unsafe_code = "forbid"

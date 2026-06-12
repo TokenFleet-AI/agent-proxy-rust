@@ -1143,7 +1143,9 @@ checksum = "92daf443525c4cce67b150400bc2316076100ce0b3686209eb8cf3c31612e6f0"
 
 [[package]]
 name = "llm-bridge-core"
-version = "0.2.5"
+version = "0.2.6"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "8ce274ae539134bd6b77a02e5b8ea6a4c2c787193c349747fc9b0030430a0dd9"
 dependencies = [
  "anyhow",
  "bytes",
