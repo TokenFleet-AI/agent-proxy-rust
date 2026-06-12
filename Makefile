@@ -18,12 +18,14 @@ check-agent-sync:
 		exit 1; \
 	}
 
+VERSION := $(shell grep -m1 '^version' Cargo.toml | cut -d'"' -f2)
+
 release:
-	@cargo release tag --execute
-	@git cliff -o CHANGELOG.md
-	@git commit -a -n -m "Update CHANGELOG.md" || true
+	@git cliff --tag v$(VERSION) -o CHANGELOG.md
+	@git commit -a -n -m "docs: update CHANGELOG for v$(VERSION)" || true
+	@cargo release tag --execute --no-confirm
 	@git push origin master
-	@cargo release push --execute
+	@git push origin v$(VERSION)
 
 update-submodule:
 	@git submodule update --init --recursive --remote

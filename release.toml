@@ -1,0 +1,16 @@
+# cargo-release workspace configuration
+# See: https://github.com/crate-ci/cargo-release/blob/master/docs/reference.md
+
+# Single version tag for the entire workspace (v1.0.0, not per-crate tags)
+shared-version = true
+tag-name = "v{{version}}"
+tag-message = "Release v{{version}}"
+
+# GitHub Releases only — do not publish to crates.io
+publish = false
+
+# Allow release only from master branch
+allow-branch = ["master"]
+
+# Pre-release commit message (when versions are bumped)
+pre-release-commit-message = "chore: release v{{version}}"
