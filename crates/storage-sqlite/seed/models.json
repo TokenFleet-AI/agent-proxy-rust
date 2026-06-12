@@ -338,5 +338,25 @@
     "currency": "CNY",
     "context_window": 200000,
     "created_at": 0
+  },
+  {
+    "id": "xiaomi-mimo:mimo-v2.5",
+    "provider_id": "xiaomi-mimo",
+    "client_name": "mimo-v2.5",
+    "price_input": 1.0,
+    "price_output": 2.0,
+    "currency": "CNY",
+    "context_window": 1000000,
+    "created_at": 0
+  },
+  {
+    "id": "xiaomi-mimo:mimo-v2.5-pro",
+    "provider_id": "xiaomi-mimo",
+    "client_name": "mimo-v2.5-pro",
+    "price_input": 1.0,
+    "price_output": 6.0,
+    "currency": "CNY",
+    "context_window": 1000000,
+    "created_at": 0
   }
 ]

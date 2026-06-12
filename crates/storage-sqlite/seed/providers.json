@@ -6,5 +6,6 @@
   {"id": "alibaba-bailian",  "name": "Alibaba Bailian",      "created_at": 0},
   {"id": "moonshot",         "name": "Moonshot (Kimi)",      "created_at": 0},
   {"id": "zhipu",            "name": "Zhipu AI",             "created_at": 0},
-  {"id": "minimax",          "name": "MiniMax",              "created_at": 0}
+  {"id": "minimax",          "name": "MiniMax",              "created_at": 0},
+  {"id": "xiaomi-mimo",       "name": "xiaomi-mimo",         "created_at": 0}
 ]
