@@ -3,7 +3,7 @@
 All notable changes to this project will be documented in this file. See [conventional commits](https://www.conventionalcommits.org/) for commit guidelines.
 
 ---
-## [unreleased]
+## [1.0.0](https://github.com/compare/seed-v1..v1.0.0) - 2026-06-12
 
 ### Bug Fixes
 
@@ -24,6 +24,7 @@ All notable changes to this project will be documented in this file. See [conven
 ### Other
 
 - add overseas models (Anthropic/OpenAI) and reorder TokenFleet channels first - ([39cac5d](https://github.com/commit/39cac5dbe13e96b7dd94c820fad7f7ac490a2f78)) - baoyx
+- Update CHANGELOG.md - ([5955427](https://github.com/commit/59554272f2feef72a3a0bb49ecddbef9a354e34f)) - baoyx
 
 ### Performance
 
