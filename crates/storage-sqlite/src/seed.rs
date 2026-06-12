@@ -416,8 +416,8 @@ impl SeedOps {
                     .map_err(|e| StorageError::Backend(format!("invalid providers: {e}")))?;
                 for p in &providers {
                     conn.execute(
-                        "INSERT OR IGNORE INTO providers (id, name, created_at) \
-                         VALUES (?1, ?2, ?3)",
+                        "INSERT OR IGNORE INTO providers (id, name, created_at) VALUES (?1, ?2, \
+                         ?3)",
                         rusqlite::params![p.id, p.name, p.created_at.max(now)],
                     )
                     .map_err(|e| StorageError::Backend(e.to_string()))?;
@@ -428,10 +428,9 @@ impl SeedOps {
                     .map_err(|e| StorageError::Backend(format!("invalid models: {e}")))?;
                 for m in &models {
                     conn.execute(
-                        "INSERT OR IGNORE INTO models \
-                         (id, provider_id, client_name, price_input, price_output, \
-                          currency, context_window, created_at) \
-                         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+                        "INSERT OR IGNORE INTO models (id, provider_id, client_name, price_input, \
+                         price_output, currency, context_window, created_at) VALUES (?1, ?2, ?3, \
+                         ?4, ?5, ?6, ?7, ?8)",
                         rusqlite::params![
                             m.id,
                             m.provider_id,
@@ -451,21 +450,15 @@ impl SeedOps {
                     .map_err(|e| StorageError::Backend(format!("invalid channels: {e}")))?;
                 for ch in &channels {
                     conn.execute(
-                        "INSERT INTO channels \
-                         (id, name, api_key, protocol, protocols, is_builtin, enabled, \
-                          created_at, updated_at, billing_type, monthly_quota, \
-                          quota_policy, priority) \
-                         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13) \
-                         ON CONFLICT(id) DO UPDATE SET \
-                           name = excluded.name, \
-                           protocol = excluded.protocol, \
-                           protocols = excluded.protocols, \
-                           is_builtin = excluded.is_builtin, \
-                           updated_at = excluded.updated_at, \
-                           billing_type = excluded.billing_type, \
-                           monthly_quota = excluded.monthly_quota, \
-                           quota_policy = excluded.quota_policy, \
-                           priority = excluded.priority",
+                        "INSERT INTO channels (id, name, api_key, protocol, protocols, \
+                         is_builtin, enabled, created_at, updated_at, billing_type, \
+                         monthly_quota, quota_policy, priority) VALUES (?1, ?2, ?3, ?4, ?5, ?6, \
+                         ?7, ?8, ?9, ?10, ?11, ?12, ?13) ON CONFLICT(id) DO UPDATE SET name = \
+                         excluded.name, protocol = excluded.protocol, protocols = \
+                         excluded.protocols, is_builtin = excluded.is_builtin, updated_at = \
+                         excluded.updated_at, billing_type = excluded.billing_type, monthly_quota \
+                         = excluded.monthly_quota, quota_policy = excluded.quota_policy, priority \
+                         = excluded.priority",
                         rusqlite::params![
                             ch.id,
                             ch.name,
@@ -490,19 +483,13 @@ impl SeedOps {
                     .map_err(|e| StorageError::Backend(format!("invalid model_mappings: {e}")))?;
                 for mm in &mappings {
                     conn.execute(
-                        "INSERT INTO model_mappings \
-                         (id, channel_id, client_name, upstream_name, billing, \
-                          pricing_json, weight, enabled, protocols) \
-                         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9) \
-                         ON CONFLICT(id) DO UPDATE SET \
-                           channel_id = excluded.channel_id, \
-                           client_name = excluded.client_name, \
-                           upstream_name = excluded.upstream_name, \
-                           billing = excluded.billing, \
-                           pricing_json = excluded.pricing_json, \
-                           weight = excluded.weight, \
-                           enabled = excluded.enabled, \
-                           protocols = excluded.protocols",
+                        "INSERT INTO model_mappings (id, channel_id, client_name, upstream_name, \
+                         billing, pricing_json, weight, enabled, protocols) VALUES (?1, ?2, ?3, \
+                         ?4, ?5, ?6, ?7, ?8, ?9) ON CONFLICT(id) DO UPDATE SET channel_id = \
+                         excluded.channel_id, client_name = excluded.client_name, upstream_name = \
+                         excluded.upstream_name, billing = excluded.billing, pricing_json = \
+                         excluded.pricing_json, weight = excluded.weight, enabled = \
+                         excluded.enabled, protocols = excluded.protocols",
                         rusqlite::params![
                             mm.id,
                             mm.channel_id,

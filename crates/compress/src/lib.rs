@@ -8,9 +8,13 @@
 
 mod token_counter;
 
-use std::io::Write;
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex};
+use std::{
+    io::Write,
+    sync::{
+        Arc, Mutex,
+        atomic::{AtomicBool, Ordering},
+    },
+};
 
 use agent_proxy_rust_core::{
     CompressionStats, ProxyError,

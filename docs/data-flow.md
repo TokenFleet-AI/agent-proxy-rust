@@ -49,8 +49,9 @@ Agent (Claude Code / Codex / Gemini CLI / ...)
 launchd/systemd 拉起 agent-proxy serve
         │
    ┌────┴────┐
-   │ seed 4  │  Anthropic / OpenAI / Google / DeepSeek
-   │ channels│  api_key 均为空, is_builtin=true
+   │ seed 9  │  tokenfleet-ai / tokenfleet-cn / dashscope-* /
+   │ channels│  deepseek / glm / kimi / minimax
+   │         │  api_key 均为空, is_builtin=true
    ├─────────┤
    │ init DB │  SQLite WAL mode + PRAGMA
    ├─────────┤
@@ -312,16 +313,6 @@ proxy → 客户端 (error):
   ③ 统一 JSON: {"error": {"code":"...","message":"..."}}
 ```
 
-## 数据目录布局
+---
 
-```
-{data_dir}/
-├── agent-proxy.db         SQLite: channels + model_mappings + cost_records
-├── agent-proxy.db-wal     WAL journal
-├── agent-proxy.db-shm     WAL shared memory
-└── config.yaml            运行时配置
-
-{data_dir} 默认值:
-  Linux:   ~/.local/share/agent-proxy/
-  macOS:   ~/Library/Application Support/com.agent-proxy/
-```
+Owner: baoyx · 版本：v1.1 · 生效日期：2026-05-27 · 最后更新：2026-06-12

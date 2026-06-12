@@ -26,7 +26,7 @@ async fn test_list_providers_after_migration() {
         .list_providers()
         .await
         .expect("list_providers failed");
-    assert_eq!(providers.len(), 8, "should have 8 seed providers");
+    assert_eq!(providers.len(), 9, "should have 9 seed providers");
     let deepseek = providers.iter().find(|p| p.name == "DeepSeek").unwrap();
     assert_eq!(deepseek.id, "deepseek");
 }
@@ -61,7 +61,7 @@ async fn test_get_provider_not_found() {
 async fn test_list_models_all() {
     let storage = setup().await;
     let models = storage.list_models(None).await.expect("list_models failed");
-    assert_eq!(models.len(), 15, "should have 15 seed models");
+    assert_eq!(models.len(), 36, "should have 36 seed models");
 }
 
 #[tokio::test]
@@ -72,7 +72,7 @@ async fn test_list_models_filtered_by_provider() {
         .list_models(Some("deepseek"))
         .await
         .expect("list_models failed");
-    assert_eq!(models.len(), 2); // deepseek has 2 models
+    assert_eq!(models.len(), 4); // deepseek has 4 models via mappings
     assert!(models.iter().all(|m| m.provider_id == "deepseek"));
 }
 
@@ -118,7 +118,8 @@ async fn test_get_channel_fields() {
         "protocols should contain deepseek base_url"
     );
     assert_eq!(channel.billing_type, "metered");
-    assert_eq!(channel.health_status, "Healthy");
+    // No API key set in seed → health is overridden to Unavailable
+    assert_eq!(channel.health_status, "Unavailable");
     assert!(channel.enabled);
 }
 
@@ -163,6 +164,12 @@ async fn test_update_channel() {
 #[serial]
 async fn test_mark_channel_healthy() {
     let storage = setup().await;
+    // Set API key first, otherwise health is always Unavailable
+    let secret = secrecy::SecretString::from("sk-test-key".to_string());
+    storage
+        .set_channel_api_key("deepseek", &secret)
+        .await
+        .expect("set_channel_api_key failed");
     storage
         .mark_channel_healthy("deepseek")
         .await
@@ -176,6 +183,8 @@ async fn test_mark_channel_healthy() {
 #[serial]
 async fn test_record_channel_failure_sequence() {
     let storage = setup().await;
+    let secret = secrecy::SecretString::from("sk-test-key".to_string());
+    storage.set_channel_api_key("deepseek", &secret).await.unwrap();
     // 1st failure → Degraded
     storage.record_channel_failure("deepseek").await.unwrap();
     let ch = storage.get_channel("deepseek").await.unwrap().unwrap();

@@ -1,6 +1,6 @@
-# 渠道设计重构方案
+# 通道设计重构方案
 
-> **状态**: 设计文档，待实施
+> **状态**: 大部分已实施（2026-06）
 > **日期**: 2026-06-04
 > **关联**: token-fleet-switch `docs/migration-http-only.md`
 
@@ -8,9 +8,9 @@
 
 ## 概述
 
-重构渠道（Channel）数据模型和路由逻辑，实现三个目标：
+重构通道（Channel）数据模型和路由逻辑，实现三个目标：
 
-1. **删除渠道级 `base_url`**，改为每个协议条目自带 `base_url`
+1. **删除通道级 `base_url`**，改为每个协议条目自带 `base_url`
 2. **`path` → `rewrite_path`**：路径重写语义，填写则覆盖请求 path，不填则透传
 3. **新增 `force_protocol`**：强制协议转换开关（测试桥接用）
 
@@ -24,7 +24,7 @@
 pub struct Channel {
     pub id: String,
     pub name: String,
-    pub base_url: String,          // ← 渠道级别，要删除
+    pub base_url: String,          // ← 通道级别，要删除
     pub api_key: SecretString,
     pub protocol: String,          // 默认协议
     pub protocols: String,         // JSON: [{"protocol":"...","path":"..."}]
@@ -50,9 +50,9 @@ forward_to_upstream():
 
 ### 问题
 
-- `base_url` 在渠道级别，一个渠道只能有一个上游地址
+- `base_url` 在通道级别，一个通道只能有一个上游地址
 - `path` 语义模糊——是前缀还是重写？当前实现会导致路径重复
-- 无法支持同一渠道不同协议走不同上游
+- 无法支持同一通道不同协议走不同上游
 - 测试协议转换需要手动构造场景
 
 ---
@@ -101,6 +101,8 @@ pub struct Channel {
 - `protocol`: 上游协议标识（`anthropic_messages` / `openai_chat` / `openai_responses`）
 - `base_url`: 该协议的上游地址
 - `rewrite_path`: **可选**。填写则**覆盖**客户端请求 path；不填则**透传**原始 path
+
+> ⚠️ 上表 JSON 使用 snake_case 便于阅读；`ProtocolEntry` 通过 `#[serde(rename_all = "camelCase")]` 实际序列化/反序列化为 `baseUrl` / `rewritePath`（种子数据与运行时 JSON 均使用 camelCase）。
 
 ### `rewrite_path` 语义
 
@@ -198,7 +200,7 @@ detected_format = AnthropicMessages
 
 ## 代码变更清单
 
-### `crates/storage/src/types.rs`
+### ✅ `crates/storage/src/types.rs`
 
 ```diff
 pub struct Channel {
@@ -222,7 +224,7 @@ pub struct Channel {
 + }
 ```
 
-### `crates/core/src/types.rs`
+### ✅ `crates/core/src/types.rs`
 
 ```diff
 pub struct ChannelConfig {
@@ -234,7 +236,7 @@ pub struct ChannelConfig {
 }
 ```
 
-### `crates/model-router/src/lib.rs`
+### ✅ `crates/model-router/src/lib.rs`
 
 | 变更 | 说明 |
 |------|------|
@@ -244,7 +246,7 @@ pub struct ChannelConfig {
 | `on_request()` 支持 `force_protocol` | `target = force_protocol.unwrap_or(channel.protocol)` |
 | `ChannelConfig` 构造填入 `rewrite_path` | |
 
-### `crates/core/src/server.rs`
+### ✅ `crates/core/src/server.rs`
 
 ```diff
 // forward_to_upstream 中:
@@ -253,7 +255,7 @@ pub struct ChannelConfig {
 + let url = format!("{}{}", channel.url.trim_end_matches('/'), path);
 ```
 
-### `crates/storage-sqlite/src/lib.rs`
+### ✅ `crates/storage-sqlite/src/lib.rs`
 
 | 变更 |
 |------|
@@ -262,7 +264,9 @@ pub struct ChannelConfig {
 | `CHANNEL_COLS`: 删 `url`，加 `force_protocol` |
 | `migrate()`: 加 v7 迁移 |
 
-### `crates/storage-sqlite/migrations/007_protocol_base_url.sql`（新建）
+### ⚠️ `crates/storage-sqlite/migrations/007_protocol_base_url.sql`（未独立创建）
+
+> 独立迁移文件未创建；schema 变更与种子数据更新直接合入 `001_init.sql`，功能等价。
 
 ```sql
 -- 将 channel 级 url 注入到每个 protocols 条目
@@ -278,7 +282,7 @@ UPDATE channels SET protocols = (
 )
 WHERE protocols != '[]' AND protocols IS NOT NULL;
 
--- 处理 protocols 为空的渠道
+-- 处理 protocols 为空的通道
 UPDATE channels SET protocols = json_array(
     json_object('protocol', protocol, 'base_url', url, 'rewrite_path', '')
 )
@@ -292,11 +296,11 @@ ALTER TABLE channels ADD COLUMN force_protocol TEXT;
 ALTER TABLE channels DROP COLUMN url;
 ```
 
-### `crates/storage-sqlite/migrations/001_init.sql`
+### ✅ `crates/storage-sqlite/migrations/001_init.sql`
 
 种子数据中 `url` 改为空字符串，`protocols` JSON 按新格式。
 
-### `apps/server/src/admin.rs`
+### ✅ `apps/server/src/admin.rs`
 
 ```diff
 struct UpdateChannelBody {
@@ -310,7 +314,7 @@ struct UpdateChannelBody {
 }
 ```
 
-### `apps/cli/`（删除）
+### ✅ `apps/cli/`（删除）
 
 整个目录删除，无用的 CLI 骨架。
 
@@ -337,7 +341,8 @@ struct UpdateChannelBody {
 ### 种子数据示例
 
 ```sql
--- DeepSeek 渠道
+-- DeepSeek 通道
+-- 注：实际 JSON 使用 camelCase（baseUrl / rewritePath），此处 snake_case 仅为示意
 INSERT INTO channels (id, name, url, api_key, protocol, protocols, ...) VALUES
 ('deepseek', 'DeepSeek', '', 'sk-deepseek',
  'openai_chat',
@@ -350,7 +355,7 @@ INSERT INTO channels (id, name, url, api_key, protocol, protocols, ...) VALUES
 
 ## 不做的
 
-- ❌ `api_key` 不移入 protocols JSON（保持渠道级别，后续迭代考虑）
+- ❌ `api_key` 不移入 protocols JSON（保持通道级别，后续迭代考虑）
 - ❌ 不修改 bridge 协议转换逻辑（`ctx.target_protocol` 仍然由 model-router 设置）
 - ❌ 不修改 `forward_to_upstream` 的核心转发逻辑（只改 path 选择）
 
@@ -383,3 +388,7 @@ INSERT INTO channels (id, name, url, api_key, protocol, protocols, ...) VALUES
 8. 更新种子数据 + 测试
 9. 删除 `apps/cli/`
 10. `make test` + `make clippy` + `make lint`
+
+---
+
+Owner: baoyx · 版本：v1.1 · 生效日期：2026-06-04 · 最后更新：2026-06-12

@@ -3,8 +3,10 @@
 //! These endpoints let token-fleet-switch manage configuration via HTTP
 //! instead of direct `SQLite` access.
 
-use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{
+    Arc,
+    atomic::{AtomicBool, Ordering},
+};
 
 use agent_proxy_rust_model_router::{ChannelState, ResolvedChannel, reload_channels_from_storage};
 use agent_proxy_rust_storage::{
@@ -66,8 +68,9 @@ pub fn admin_routes(
     compress_enabled: Arc<AtomicBool>,
     channels_swap: Arc<ArcSwap<Vec<ResolvedChannel>>>,
 ) -> Router {
-    use crate::admin_auth::{AdminAuthLayer, admin_auth_middleware};
     use axum::middleware;
+
+    use crate::admin_auth::{AdminAuthLayer, admin_auth_middleware};
 
     let state = AdminState {
         storage,
@@ -330,7 +333,8 @@ async fn update_channel(
             return Err(AppError {
                 status: StatusCode::BAD_REQUEST,
                 message: format!(
-                    "force_protocol '{fp}' not found in channel protocols. Supported: {supported:?}"
+                    "force_protocol '{fp}' not found in channel protocols. Supported: \
+                     {supported:?}"
                 ),
             });
         }
@@ -1024,7 +1028,7 @@ mod tests {
             .await
             .unwrap();
         let providers: Vec<Value> = serde_json::from_slice(&body).unwrap();
-        assert_eq!(providers.len(), 8);
+        assert_eq!(providers.len(), 9);
     }
 
     #[tokio::test]
@@ -1105,8 +1109,9 @@ mod tests {
     // ── compute_time_range tests ─────────────────────────────────────────
 
     mod time_range {
-        use super::super::compute_time_range;
         use chrono::{TimeZone, Utc};
+
+        use super::super::compute_time_range;
 
         #[test]
         fn test_no_tz_offset_uses_rolling_window() {

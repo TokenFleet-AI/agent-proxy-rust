@@ -125,8 +125,9 @@ pub trait CostRecorder: Send + Sync + std::fmt::Debug {
 
 // ── ModelAliasMiddleware ────────────────────────────────────────────────
 
-use bytes::Bytes;
 use std::collections::HashMap;
+
+use bytes::Bytes;
 use tracing::info;
 
 /// Middleware that applies model alias mapping before routing.

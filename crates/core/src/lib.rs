@@ -35,8 +35,7 @@ pub mod types;
 pub use compression::{CompressionStats, read_tokenless_stats};
 pub use config::ProxyConfig;
 pub use error::ProxyError;
-pub use middleware::CostRecorder;
-pub use middleware::ProxyMiddleware;
+pub use middleware::{CostRecorder, ProxyMiddleware};
 pub use server::{AgentProxy, AgentProxyBuilder};
 pub use types::{
     AgentType, ApiFormat, ChannelConfig, ConnectionContext, ProxyRequest, ProxyResponse,

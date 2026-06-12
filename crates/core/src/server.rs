@@ -16,10 +16,9 @@ use axum::{
     response::IntoResponse,
     routing::{get, post},
 };
+use secrecy::ExposeSecret;
 use tokio::task::JoinHandle;
 use tower_http::limit::RequestBodyLimitLayer;
-
-use secrecy::ExposeSecret;
 
 use crate::{
     auth::{self, AgentRole, AuthState},
@@ -1149,7 +1148,8 @@ mod tests {
         assert_eq!(output2.trim(), input2.trim());
 
         // Test mixed format
-        let input3 = "event:message_start\ndata: {\"type\":\"message_start\"}\n\nevent: message_delta\ndata:{\"type\":\"message_delta\"}";
+        let input3 = "event:message_start\ndata: {\"type\":\"message_start\"}\n\nevent: \
+                      message_delta\ndata:{\"type\":\"message_delta\"}";
         let output3 = normalize_sse_format(input3);
         assert!(output3.contains("event: message_start"));
         assert!(output3.contains("data: {\"type\":\"message_start\"}"));

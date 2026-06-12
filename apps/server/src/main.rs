@@ -7,8 +7,7 @@ use std::{path::PathBuf, sync::Arc};
 
 use agent_proxy_rust_bridge::BridgeMiddleware;
 use agent_proxy_rust_compress::CompressMiddleware;
-use agent_proxy_rust_core::middleware::ModelAliasMiddleware;
-use agent_proxy_rust_core::{AgentProxyBuilder, ProxyConfig};
+use agent_proxy_rust_core::{AgentProxyBuilder, ProxyConfig, middleware::ModelAliasMiddleware};
 use agent_proxy_rust_cost::CostMiddleware;
 use agent_proxy_rust_model_router::ModelRouterMiddleware;
 use agent_proxy_rust_storage::{SeedManager, Storage};

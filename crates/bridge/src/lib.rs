@@ -454,6 +454,8 @@ where
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
+    use std::sync::LazyLock;
+
     use agent_proxy_rust_core::{
         error::ProxyError,
         extensions::EXT_BRIDGE_REVERSE,
@@ -464,7 +466,6 @@ mod tests {
     use http::{HeaderMap, Method, StatusCode};
 
     use super::*;
-    use std::sync::LazyLock;
 
     // -------------------------------------------------------------------------
     // Test fixtures

@@ -4,7 +4,6 @@ use std::{any::Any, collections::HashMap, time::Instant};
 
 use bytes::Bytes;
 use http::{Method, header::HeaderMap};
-
 /// Re-exported from [`llm_bridge_core::model::ApiFormat`] as the single source of truth.
 pub use llm_bridge_core::model::ApiFormat;
 

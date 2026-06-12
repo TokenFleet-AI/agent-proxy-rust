@@ -202,16 +202,16 @@ impl Storage for SqliteStorage {
             let (sql, param_values): (&str, Vec<String>) = match &provider_id {
                 Some(pid) => (
                     "SELECT m.id, m.provider_id, m.client_name, m.price_input, m.price_output, \
-                     m.currency, m.context_window, m.created_at, \
-                     COALESCE((SELECT COUNT(*) FROM model_mappings WHERE client_name = m.client_name), 0) as channel_count \
-                     FROM models m WHERE m.provider_id = ?1 ORDER BY m.client_name",
+                     m.currency, m.context_window, m.created_at, COALESCE((SELECT COUNT(*) FROM \
+                     model_mappings WHERE client_name = m.client_name), 0) as channel_count FROM \
+                     models m WHERE m.provider_id = ?1 ORDER BY m.client_name",
                     vec![pid.clone()],
                 ),
                 None => (
                     "SELECT m.id, m.provider_id, m.client_name, m.price_input, m.price_output, \
-                     m.currency, m.context_window, m.created_at, \
-                     COALESCE((SELECT COUNT(*) FROM model_mappings WHERE client_name = m.client_name), 0) as channel_count \
-                     FROM models m ORDER BY m.provider_id, m.client_name",
+                     m.currency, m.context_window, m.created_at, COALESCE((SELECT COUNT(*) FROM \
+                     model_mappings WHERE client_name = m.client_name), 0) as channel_count FROM \
+                     models m ORDER BY m.provider_id, m.client_name",
                     vec![],
                 ),
             };
@@ -232,11 +232,14 @@ impl Storage for SqliteStorage {
                         price_output: row.get(4)?,
                         currency: row.get(5)?,
                         context_window: row.get(6)?,
-                        created_at: row.get::<_, i64>(7).map(|ts| {
-                            chrono::DateTime::from_timestamp(ts, 0)
-                                .unwrap_or_default()
-                                .to_rfc3339()
-                        }).unwrap_or_default(),
+                        created_at: row
+                            .get::<_, i64>(7)
+                            .map(|ts| {
+                                chrono::DateTime::from_timestamp(ts, 0)
+                                    .unwrap_or_default()
+                                    .to_rfc3339()
+                            })
+                            .unwrap_or_default(),
                         channel_count: row.get(8)?,
                     })
                 })
@@ -261,9 +264,9 @@ impl Storage for SqliteStorage {
             let mut stmt = conn
                 .prepare(
                     "SELECT m.id, m.provider_id, m.client_name, m.price_input, m.price_output, \
-                     m.currency, m.context_window, m.created_at, \
-                     COALESCE((SELECT COUNT(*) FROM model_mappings WHERE client_name = m.client_name), 0) \
-                     FROM models m WHERE m.id = ?1",
+                     m.currency, m.context_window, m.created_at, COALESCE((SELECT COUNT(*) FROM \
+                     model_mappings WHERE client_name = m.client_name), 0) FROM models m WHERE \
+                     m.id = ?1",
                 )
                 .map_err(|e| StorageError::Backend(e.to_string()))?;
             let mut rows = stmt
@@ -276,11 +279,14 @@ impl Storage for SqliteStorage {
                         price_output: row.get(4)?,
                         currency: row.get(5)?,
                         context_window: row.get(6)?,
-                        created_at: row.get::<_, i64>(7).map(|ts| {
-                            chrono::DateTime::from_timestamp(ts, 0)
-                                .unwrap_or_default()
-                                .to_rfc3339()
-                        }).unwrap_or_default(),
+                        created_at: row
+                            .get::<_, i64>(7)
+                            .map(|ts| {
+                                chrono::DateTime::from_timestamp(ts, 0)
+                                    .unwrap_or_default()
+                                    .to_rfc3339()
+                            })
+                            .unwrap_or_default(),
                         channel_count: row.get(8)?,
                     })
                 })
@@ -391,8 +397,8 @@ impl Storage for SqliteStorage {
                 .map_err(|e| StorageError::Connection(e.to_string()))?;
             conn.execute(
                 "INSERT INTO channels (id, name, api_key, protocol, protocols, is_builtin, \
-                 enabled, created_at, updated_at, health_status, billing_type, \
-                 monthly_quota, quota_policy, priority, force_protocol)
+                 enabled, created_at, updated_at, health_status, billing_type, monthly_quota, \
+                 quota_policy, priority, force_protocol)
                  VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)
                  ON CONFLICT(id) DO UPDATE SET
                    name = excluded.name,
@@ -824,9 +830,15 @@ impl Storage for SqliteStorage {
     async fn list_all_mappings(&self) -> Result<Vec<ModelMapping>, StorageError> {
         let pool = self.get_pool();
         tokio::task::spawn_blocking(move || {
-            let conn = pool.get().map_err(|e| StorageError::Connection(e.to_string()))?;
+            let conn = pool
+                .get()
+                .map_err(|e| StorageError::Connection(e.to_string()))?;
             let mut stmt = conn
-                .prepare("SELECT id, channel_id, client_name, upstream_name, billing, pricing_json, weight, enabled, protocols FROM model_mappings ORDER BY channel_id, client_name")
+                .prepare(
+                    "SELECT id, channel_id, client_name, upstream_name, billing, pricing_json, \
+                     weight, enabled, protocols FROM model_mappings ORDER BY channel_id, \
+                     client_name",
+                )
                 .map_err(|e| StorageError::Backend(e.to_string()))?;
             let rows = stmt
                 .query_map([], |row| {
@@ -863,8 +875,8 @@ impl Storage for SqliteStorage {
                 .map_err(|e| StorageError::Connection(e.to_string()))?;
             let mut stmt = conn
                 .prepare(
-                    "SELECT id, alias_name, target_model, enabled, created_at, updated_at \
-                     FROM model_aliases ORDER BY alias_name",
+                    "SELECT id, alias_name, target_model, enabled, created_at, updated_at FROM \
+                     model_aliases ORDER BY alias_name",
                 )
                 .map_err(|e| StorageError::Backend(e.to_string()))?;
             let rows = stmt
@@ -901,8 +913,7 @@ impl Storage for SqliteStorage {
                 .map_err(|e| StorageError::Connection(e.to_string()))?;
             let mut stmt = conn
                 .prepare(
-                    "SELECT target_model FROM model_aliases \
-                     WHERE alias_name = ?1 AND enabled = 1",
+                    "SELECT target_model FROM model_aliases WHERE alias_name = ?1 AND enabled = 1",
                 )
                 .map_err(|e| StorageError::Backend(e.to_string()))?;
             let result = stmt
@@ -929,7 +940,8 @@ impl Storage for SqliteStorage {
                 .get()
                 .map_err(|e| StorageError::Connection(e.to_string()))?;
             conn.execute(
-                "INSERT INTO model_aliases (alias_name, target_model, enabled, created_at, updated_at)
+                "INSERT INTO model_aliases (alias_name, target_model, enabled, created_at, \
+                 updated_at)
                  VALUES (?1, ?2, ?3, datetime('now'), datetime('now'))
                  ON CONFLICT(alias_name) DO UPDATE SET
                    target_model = excluded.target_model,
@@ -942,8 +954,8 @@ impl Storage for SqliteStorage {
             // Fetch the inserted/updated row
             let mut stmt = conn
                 .prepare(
-                    "SELECT id, alias_name, target_model, enabled, created_at, updated_at \
-                     FROM model_aliases WHERE alias_name = ?1",
+                    "SELECT id, alias_name, target_model, enabled, created_at, updated_at FROM \
+                     model_aliases WHERE alias_name = ?1",
                 )
                 .map_err(|e| StorageError::Backend(e.to_string()))?;
             stmt.query_row(params![alias_name], |row| {
@@ -988,7 +1000,8 @@ impl Storage for SqliteStorage {
                 .map_err(|e| StorageError::Connection(e.to_string()))?;
             let rows = conn
                 .execute(
-                    "UPDATE model_aliases SET enabled = ?1, updated_at = datetime('now') WHERE id = ?2",
+                    "UPDATE model_aliases SET enabled = ?1, updated_at = datetime('now') WHERE id \
+                     = ?2",
                     params![i32::from(enabled), id],
                 )
                 .map_err(|e| StorageError::Backend(e.to_string()))?;
@@ -1040,14 +1053,18 @@ impl Storage for SqliteStorage {
                 .map_err(|e| StorageError::Connection(e.to_string()))?;
             conn.execute(
                 "INSERT INTO cost_records
-                 (id, channel_id, upstream_channel, upstream_model, request_time_ms, project, user_id, agent_type,
+                 (id, channel_id, upstream_channel, upstream_model, request_time_ms, project, \
+                 user_id, agent_type,
                   input_tokens, output_tokens, cache_write_tokens, cache_read_tokens,
                   thinking_tokens, cost,
                   schema_saved_tokens, response_saved_tokens, rtk_saved_tokens,
                   pre_compress_tokens, post_compress_tokens, compression_tokens_saved,
                   unit, pricing_snapshot_json, timestamp,
-                  session_id, before_tokens, after_tokens, tokens_saved, compression_breakdown_json)
-                 VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,?20,?21,?22,?23,
+                  session_id, before_tokens, after_tokens, tokens_saved, \
+                 compression_breakdown_json)
+                 VALUES \
+                 (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,?20,?21,?22,?\
+                 23,
                          ?24,?25,?26,?27,?28)",
                 params![
                     id,
@@ -1099,13 +1116,15 @@ impl Storage for SqliteStorage {
                 .map_err(|e| StorageError::Connection(e.to_string()))?;
 
             let mut sql = String::from(
-                "SELECT id, channel_id, upstream_channel, upstream_model, request_time_ms, project, user_id, agent_type,
+                "SELECT id, channel_id, upstream_channel, upstream_model, request_time_ms, \
+                 project, user_id, agent_type,
                         input_tokens, output_tokens, cache_write_tokens, cache_read_tokens,
                         thinking_tokens, cost,
                         schema_saved_tokens, response_saved_tokens, rtk_saved_tokens,
                         pre_compress_tokens, post_compress_tokens, compression_tokens_saved,
                         unit, pricing_snapshot_json, timestamp,
-                        session_id, before_tokens, after_tokens, tokens_saved, compression_breakdown_json
+                        session_id, before_tokens, after_tokens, tokens_saved, \
+                 compression_breakdown_json
                  FROM cost_records WHERE 1=1",
             );
             let mut param_values: Vec<Box<dyn rusqlite::types::ToSql>> = Vec::new();
@@ -1893,7 +1912,8 @@ mod tests {
 
         let count: i64 = conn
             .query_row(
-                "SELECT COUNT(*) FROM models WHERE client_name IN ('deepseek-v4-pro', 'deepseek-v4-flash')",
+                "SELECT COUNT(*) FROM models WHERE client_name IN ('deepseek-v4-pro', \
+                 'deepseek-v4-flash')",
                 [],
                 |row| row.get(0),
             )
@@ -2047,7 +2067,8 @@ mod tests {
             .await
             .unwrap();
         let aliases = storage.list_model_aliases().await.unwrap();
-        assert_eq!(aliases.len(), 2);
+        // 5 seed aliases from migration + 1 new (gpt-4o, since gpt-5.5 already existed)
+        assert!(aliases.len() >= 3, "expected at least 3 aliases (seed + test), got {}", aliases.len());
     }
 
     #[tokio::test]

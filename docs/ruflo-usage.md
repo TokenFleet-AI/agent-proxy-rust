@@ -479,3 +479,7 @@ Use Ruflo orchestration for implementation review: check tests, docs, security, 
 
 - Ruflo 仓库：<https://github.com/ruvnet/ruflo>
 - Ruflo 用户指南：<https://github.com/ruvnet/ruflo/blob/main/docs/USERGUIDE.md>
+
+---
+
+Owner: baoyx · 版本：v1.0 · 生效日期：2026-05-21 · 最后更新：2026-06-12

@@ -18,8 +18,7 @@ use agent_proxy_rust_core::{
     middleware::ProxyMiddleware,
     types::{ApiFormat, ChannelConfig, ConnectionContext, ProxyRequest, ProxyResponse},
 };
-use agent_proxy_rust_storage::ProtocolEntry;
-use agent_proxy_rust_storage::Storage;
+use agent_proxy_rust_storage::{ProtocolEntry, Storage};
 use arc_swap::ArcSwap;
 use async_trait::async_trait;
 use dashmap::DashMap;
@@ -592,7 +591,8 @@ impl ProxyMiddleware for ModelRouterMiddleware {
                         .map(|p| p.protocol.as_str())
                         .collect();
                     return Err(ProxyError::Internal(anyhow::anyhow!(
-                        "mapping '{}' protocol constraint {:?} incompatible with channel protocols {channel_prots:?}",
+                        "mapping '{}' protocol constraint {:?} incompatible with channel \
+                         protocols {channel_prots:?}",
                         mapping.mapping_id,
                         mapping.allowed_protocols,
                     )));
@@ -719,8 +719,8 @@ impl ProxyMiddleware for ModelRouterMiddleware {
 /// Resolves the target protocol for a request using a 3-step strategy:
 ///
 /// 1. If `force_protocol` is set, validate it exists in `protocols` and use it.
-/// 2. Otherwise, if the client's `detected_format` matches a protocol in `protocols`,
-///    use it (passthrough, no conversion).
+/// 2. Otherwise, if the client's `detected_format` matches a protocol in `protocols`, use it
+///    (passthrough, no conversion).
 /// 3. Otherwise, fall back to the first protocol in `protocols`.
 ///
 /// # Errors

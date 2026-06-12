@@ -163,3 +163,7 @@ pre-commit autoupdate
 - `pre-commit` 作为提交前本地安全网。
 - 除非用户明确要求且记录原因，不要绕过 hooks。
 - 保留 `agent-proxy-rust` 等模板占位符。
+
+---
+
+Owner: baoyx · 版本：v1.0 · 生效日期：2026-05-21 · 最后更新：2026-06-12

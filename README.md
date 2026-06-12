@@ -2,6 +2,8 @@
 
 A composable middleware proxy for AI agent APIs. Sits between AI coding agents (Claude Code, Codex, Gemini CLI) and upstream API providers.
 
+**Phase 1 ✅** | 151+ tests | 9 seed channels | 36 models | 57 mappings
+
 ```
 Client (Claude Code / Codex / Gemini CLI)
         │
@@ -21,6 +23,16 @@ Client (Claude Code / Codex / Gemini CLI)
 Upstream APIs (Anthropic / OpenAI / DeepSeek / ...)
 ```
 
+## Why
+
+AI coding agents (Claude Code, Codex, Gemini CLI) hard-code API endpoints. When you need to:
+- Route through a subscription plan (Copilot, TokenFleet) instead of pay-as-you-go
+- Switch providers without reconfiguring every agent
+- Track token costs per project across multiple LLM services
+- Translate between incompatible API protocols (Anthropic ↔ OpenAI)
+
+You need a local proxy that handles it transparently. agent-proxy-rust sits between your agents and upstream APIs, compressing context, selecting optimal channels, translating protocols, and tracking costs — all with zero agent-side changes.
+
 ## Features
 
 - **Smart Routing** — Subscription-first, metered fallback. Supports Copilot coding plans with automatic failover.
@@ -32,45 +44,67 @@ Upstream APIs (Anthropic / OpenAI / DeepSeek / ...)
 ## Quick Start
 
 ```bash
-# Install
-cargo install agent-proxy
+# Prerequisites: Rust toolchain (rustup), at least one LLM provider API key
 
-# Start (4 default channels seeded, add your API keys)
-agent-proxy serve
+# 1. Install
+cargo install --path apps/server
+# Or download prebuilt binary from GitHub Releases
 
-# Set API key for a channel
-agent-proxy channel set-key anthropic-official --api-key "sk-ant-xxx"
+# 2. Generate encryption key (REQUIRED)
+export PROXY_SECRET=$(openssl rand -hex 32)
 
-# Add a custom channel
-agent-proxy channel add openrouter \
-  --url "https://openrouter.ai/api/v1" \
-  --protocol anthropic_messages \
-  --api-key "sk-or-xxx"
+# 3. Start the proxy
+agent-proxy serve &
+
+# 4. Set upstream API key for a channel
+agent-proxy channel set-key deepseek --api-key "sk-xxx"
+
+# 5. Verify
+curl http://127.0.0.1:8787/health
+
+# 6. Point your AI agent to the proxy
+export ANTHROPIC_BASE_URL="http://127.0.0.1:8787"
 ```
 
-Configure your AI coding agent to use `http://127.0.0.1:8787` as the API endpoint.
+📖 For full configuration guide, see [User Guide](docs/user-guide.md)
 
 ## Architecture
 
 | Crate | Purpose |
 |-------|---------|
-| `core` | Middleware trait, axum server, upstream forwarding |
-| `model-router` | Channel selection, model name mapping |
+| `core` | Middleware trait, axum server, upstream forwarding, auth |
+| `model-router` | Channel selection, model name mapping, failover |
+| `bridge` | Protocol translation (Anthropic ↔ OpenAI) via llm-bridge-core |
 | `compress` | Token compression via tokenless-schema |
-| `bridge` | Protocol translation via llm-bridge-core |
 | `cost` | Per-project cost tracking (SQLite) |
+| `storage` | Backend-agnostic storage trait |
+| `storage-sqlite` | SQLite implementation with seed data |
+| `resilience` | Rate limiting, retry, circuit breaker |
+| `server` | Main binary, CLI, admin API |
 
 Request flow: `compress → route → bridge → forward → bridge ← route ← compress → cost`
 
-See [specs/](specs/) for detailed design documents.
+See [Architecture](docs/architecture.md) for detailed design and [specs/](specs/) for design documents.
+
+## Development
+
+```bash
+make build       # Compile
+make test        # Run tests
+make lint        # fmt + clippy check
+make clippy      # Clippy only
+make release     # Tag + CHANGELOG + push (triggers GitHub CD)
+```
+
+See [CONTRIBUTING.md](CONTRIBUTING.md) and [Release Guide](docs/release-guide.md).
 
 ## Phased Roadmap
 
-| Phase | Scope |
-|-------|-------|
-| **Phase 1** | Local desktop MVP — single user, simple channel selection, SQLite cost tracking |
-| **Phase 2** | Cloud-ready — health probes, Docker, config layers, multi-instance |
-| **Extension** | Rate limiting, Credits/CharBased pricing — separate crates |
+| Phase | Scope | Status |
+|-------|-------|--------|
+| **Phase 1** | Local desktop MVP — single user, channel selection, SQLite cost tracking, protocol bridge | ✅ Complete |
+| **Phase 2** | Cloud-ready — health probes, Docker, config layers, multi-instance | Planned |
+| **Extension** | Rate limiting, Credits/CharBased pricing — separate crates | Planned |
 
 ## Related Projects
 
