@@ -24,13 +24,13 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 rstest = "0.24"
 
 # workspace crates
-agent-proxy-rust-core = { path = "crates/core" }
-agent-proxy-rust-storage = { path = "crates/storage" }
-agent-proxy-rust-model-router = { path = "crates/model-router" }
-agent-proxy-rust-cost = { path = "crates/cost" }
-agent-proxy-rust-storage-sqlite = { path = "crates/storage-sqlite" }
-agent-proxy-rust-bridge = { path = "crates/bridge" }
-agent-proxy-rust-compress = { path = "crates/compress" }
+agent-proxy-rust-core = { path = "crates/core", version = "1.1.1" }
+agent-proxy-rust-storage = { path = "crates/storage", version = "1.1.1" }
+agent-proxy-rust-model-router = { path = "crates/model-router", version = "1.1.1" }
+agent-proxy-rust-cost = { path = "crates/cost", version = "1.1.1" }
+agent-proxy-rust-storage-sqlite = { path = "crates/storage-sqlite", version = "1.1.1" }
+agent-proxy-rust-bridge = { path = "crates/bridge", version = "1.1.1" }
+agent-proxy-rust-compress = { path = "crates/compress", version = "1.1.1" }
 
 # External protocol translation
 llm-bridge-core = "0.2.6"
