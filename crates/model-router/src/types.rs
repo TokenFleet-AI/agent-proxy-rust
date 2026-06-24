@@ -379,6 +379,7 @@ impl ChannelState {
     /// Rate-limited channels (1 failure) use a 30-second cooldown.
     /// Other failures use exponential backoff based on `base_cooldown`.
     #[must_use]
+    #[allow(unknown_lints, clippy::duration_suboptimal_units)]
     pub fn is_tryable_past_cooldown(&self) -> bool {
         const RATE_LIMIT_COOLDOWN: Duration = Duration::from_secs(30);
         const BASE_COOLDOWN: Duration = Duration::from_secs(60);
