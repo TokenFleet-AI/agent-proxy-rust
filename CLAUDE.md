@@ -26,6 +26,56 @@ This repository is a reusable Rust 2024 workspace template. These rules are mand
 - For specs, inspect `specs/`, place new files there, name them `{feature-name}-{type}.md`, and update `specs/index.md`.
 - For docs, inspect `docs/`, place new files there, and update `docs/index.md`. If documentation was not explicitly requested but is useful, still place it under `docs/`.
 
+## Release Process
+
+Use the automated release script for all releases:
+
+```bash
+# Full release (bump version, changelog, tag, publish to crates.io)
+./scripts/release.sh 1.2.0
+
+# Or manually step by step:
+make bump-version NEW_VERSION=1.2.0
+git cliff --tag v1.2.0 -o CHANGELOG.md
+git add -A && git commit -m "chore: release v1.2.0"
+git tag -a v1.2.0 -m "Release v1.2.0"
+git push origin master && git push origin v1.2.0
+make publish-crate
+```
+
+### Release Checklist
+
+1. **Version bump**: Updates `Cargo.toml` workspace version and all internal dependency versions
+2. **Changelog**: Generates CHANGELOG.md using git-cliff (install with `cargo install git-cliff`)
+3. **Validation**: Runs `cargo clippy --all-targets --all-features -- -D warnings`
+4. **Git operations**: Creates commit and annotated tag, pushes to remote
+5. **Crates.io**: Publishes all library crates in dependency order (excludes apps/server)
+
+### Published Crates
+
+- `agent-proxy-rust-core` - Core middleware trait and auth
+- `agent-proxy-rust-storage` - Backend-agnostic storage trait
+- `agent-proxy-rust-storage-sqlite` - SQLite storage backend
+- `agent-proxy-rust-model-router` - Model routing and channel selection
+- `agent-proxy-rust-cost` - Cost tracking middleware
+- `agent-proxy-rust-resilience` - Rate limiter, retry, circuit breaker
+- `agent-proxy-rust-compress` - Token compression middleware
+- `agent-proxy-rust-bridge` - Protocol translation bridge
+
+### Workspace Dependency Requirements
+
+All workspace crate dependencies MUST include both `path` and `version` for crates.io publishing:
+
+```toml
+# ✅ Correct - has both path and version
+agent-proxy-rust-core = { path = "crates/core", version = "1.1.1" }
+
+# ❌ Wrong - missing version (will fail crates.io verification)
+agent-proxy-rust-core = { path = "crates/core" }
+```
+
+The `make bump-version` and `./scripts/release.sh` commands handle this automatically.
+
 ## Required Validation
 
 - Prefer the smallest validation that proves the change.
