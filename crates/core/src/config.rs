@@ -44,6 +44,7 @@ impl Default for ProxyConfig {
         Self {
             listen: SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 8787),
             max_body_size: 16 * 1024 * 1024, // 16 MB
+            #[allow(unknown_lints, clippy::duration_suboptimal_units)]
             upstream_read_timeout: Duration::from_secs(600),
             upstream_connect_timeout: Duration::from_secs(10),
             proxy_api_key: None,
@@ -78,6 +79,7 @@ mod tests {
     use super::*;
 
     #[test]
+    #[allow(unknown_lints, clippy::duration_suboptimal_units)]
     fn test_default_config_values() {
         let config = ProxyConfig::default();
         assert_eq!(config.max_body_size, 16 * 1024 * 1024);
