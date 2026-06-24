@@ -70,4 +70,27 @@ seed-tag: seed-manifest
 	echo "✅ Created tag $$tag"; \
 	echo "   Run: git push origin $$tag"
 
-.PHONY: build test fmt clippy lint check-agent-sync release update-submodule seed-manifest seed-tag
+# ── Crates.io Publishing ────────────────────────────────────────────
+# Publish crates to crates.io in dependency order
+# Only library crates are published (not apps/server)
+
+CRATES_PUBLISH_ORDER = \
+	crates/core \
+	crates/storage \
+	crates/model-router \
+	crates/cost \
+	crates/resilience \
+	crates/compress \
+	crates/bridge \
+	crates/storage-sqlite
+
+publish-crate:
+	@echo "📦 Publishing crates to crates.io..."
+	@for crate in $(CRATES_PUBLISH_ORDER); do \
+		echo "  Publishing $$crate..."; \
+		cargo publish -p $$(basename $$crate) --allow-dirty || exit 1; \
+		sleep 2; \
+	done
+	@echo "✅ All crates published successfully!"
+
+.PHONY: build test fmt clippy lint check-agent-sync release publish-crate update-submodule seed-manifest seed-tag

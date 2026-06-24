@@ -3,6 +3,20 @@
 All notable changes to this project will be documented in this file. See [conventional commits](https://www.conventionalcommits.org/) for commit guidelines.
 
 ---
+## [1.1.1](https://github.com/compare/v1.1.0..v1.1.1) - 2026-06-24
+
+### Bug Fixes
+
+- suppress clippy duration_suboptimal_units lint for Rust 1.96 compatibility - ([ace6250](https://github.com/commit/ace6250)) - baoyx
+- handle renamed and new clippy lints for Rust 1.96 compatibility - ([b22c5e2](https://github.com/commit/b22c5e2)) - baoyx
+- allow duration_suboptimal_units lint in is_tryable_past_cooldown - ([142ac92](https://github.com/commit/142ac92)) - baoyx
+- allow duration_suboptimal_units lint in resilience test modules - ([3517454](https://github.com/commit/3517454)) - baoyx
+
+### Miscellaneous Chores
+
+- upgrade Rust toolchain from 1.89.0 to 1.96.0 to match CI - ([115a876](https://github.com/commit/115a876)) - baoyx
+
+---
 ## [1.1.0](https://github.com/compare/v1.0.1..v1.1.0) - 2026-06-24
 
 ### Bug Fixes
