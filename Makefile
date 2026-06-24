@@ -20,6 +20,24 @@ check-agent-sync:
 
 VERSION := $(shell grep -m1 '^version' Cargo.toml | cut -d'"' -f2)
 
+bump-version:
+	@if [ -z "$(NEW_VERSION)" ]; then \
+		echo "❌ Usage: make bump-version NEW_VERSION=x.y.z"; \
+		exit 1; \
+	fi
+	@echo "📦 Bumping version to $(NEW_VERSION)..."
+	@sed -i '' 's/^version = "[^"]*"/version = "$(NEW_VERSION)"/' Cargo.toml
+	@# Update workspace crate dependencies in Cargo.toml
+	@for crate in core storage model-router cost storage-sqlite bridge compress; do \
+		sed -i '' "s/agent-proxy-rust-$$crate = { path = \"[^\"]*\", version = \"[^\"]*\" }/agent-proxy-rust-$$crate = { path = \"crates/$$crate\", version = \"$(NEW_VERSION)\" }/g" Cargo.toml; \
+	done
+	@# Update internal dependencies in crate Cargo.toml files
+	@for crate in crates/compress crates/cost crates/model-router crates/resilience crates/storage-sqlite crates/bridge; do \
+		sed -i '' "s/agent-proxy-rust-\(.*\) = { path = \"[^\"]*\", version = \"[^\"]*\" }/agent-proxy-rust-\1 = { path = \"..\/\2\", version = \"$(NEW_VERSION)\" }/g" $$crate/Cargo.toml; \
+	done
+	@cargo update --workspace 2>&1 | tail -5
+	@echo "✅ Version bumped to $(NEW_VERSION)"
+
 release:
 	@git cliff --tag v$(VERSION) -o CHANGELOG.md
 	@git commit -a -n -m "docs: update CHANGELOG for v$(VERSION)" || true
@@ -75,22 +93,22 @@ seed-tag: seed-manifest
 # Only library crates are published (not apps/server)
 
 CRATES_PUBLISH_ORDER = \
-	crates/core \
-	crates/storage \
-	crates/model-router \
-	crates/cost \
-	crates/resilience \
-	crates/compress \
-	crates/bridge \
-	crates/storage-sqlite
+	agent-proxy-rust-core \
+	agent-proxy-rust-storage \
+	agent-proxy-rust-model-router \
+	agent-proxy-rust-cost \
+	agent-proxy-rust-resilience \
+	agent-proxy-rust-compress \
+	agent-proxy-rust-bridge \
+	agent-proxy-rust-storage-sqlite
 
 publish-crate:
 	@echo "📦 Publishing crates to crates.io..."
 	@for crate in $(CRATES_PUBLISH_ORDER); do \
 		echo "  Publishing $$crate..."; \
-		cargo publish -p $$(basename $$crate) --allow-dirty || exit 1; \
+		cargo publish -p $$crate --allow-dirty || exit 1; \
 		sleep 2; \
 	done
-	@echo "✅ All crates published successfully!"
+	@echo "✅ All crates published successful… (truncated)
 
 .PHONY: build test fmt clippy lint check-agent-sync release publish-crate update-submodule seed-manifest seed-tag
