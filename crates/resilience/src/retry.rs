@@ -104,7 +104,13 @@ impl ProxyMiddleware for RetryMiddleware {
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
+#[allow(
+    unknown_lints,
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::panic,
+    clippy::duration_suboptimal_units
+)]
 mod tests {
     use super::*;
 
