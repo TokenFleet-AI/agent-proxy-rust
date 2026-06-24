@@ -10,9 +10,9 @@ use std::sync::{
 
 use agent_proxy_rust_model_router::{ChannelState, ResolvedChannel, reload_channels_from_storage};
 use agent_proxy_rust_storage::{
-    AvailableChannelInfo, Channel, CompressionSavingsReport, CostAggregate, CostFilter,
-    CostGroupBy, CostRecord, Model, ModelMapping, ProtocolEntry, Provider, SeedManager, SeedStatus,
-    Storage, StorageError, SwitchLog, TimeRange,
+    AvailableChannelInfo, Channel, ChannelHealthStatus, CompressionSavingsReport, CostAggregate,
+    CostFilter, CostGroupBy, CostRecord, Model, ModelMapping, ProtocolEntry, Provider, SeedManager,
+    SeedStatus, Storage, StorageError, SwitchLog, TimeRange,
 };
 use arc_swap::ArcSwap;
 use axum::{
@@ -25,6 +25,7 @@ use axum::{
 use dashmap::DashMap;
 use serde::{Deserialize, Serialize};
 use tower_http::cors::{Any, CorsLayer};
+use tower_http::limit::RequestBodyLimitLayer;
 
 /// Shared state for admin handlers.
 #[derive(Clone)]
@@ -140,6 +141,7 @@ pub fn admin_routes(
                 .allow_methods(Any)
                 .allow_headers(Any),
         )
+        .layer(RequestBodyLimitLayer::new(1024 * 1024)) // 1 MB
         .with_state(state);
 
     if let Some(key) = admin_key {
@@ -180,6 +182,32 @@ struct UpdateChannelBody {
     force_protocol: Option<String>,
 }
 
+/// Set channel API key request body.
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ApiKeyBody {
+    api_key: String,
+}
+
+/// Partial update for model mapping.
+#[derive(Debug, Default, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct UpdateMappingBody {
+    upstream_name: Option<String>,
+    client_name: Option<String>,
+    billing: Option<String>,
+    pricing_json: Option<String>,
+    weight: Option<u32>,
+    enabled: Option<bool>,
+    protocols: Option<String>,
+}
+
+/// Compress toggle request body.
+#[derive(Debug, Deserialize)]
+struct CompressToggleBody {
+    enabled: bool,
+}
+
 /// Cost records query params.
 #[derive(Debug, Deserialize)]
 struct CostRecordsQuery {
@@ -197,24 +225,42 @@ struct CostRecordsQuery {
 /// Wire result type.
 type ApiResult<T> = Result<Json<T>, AppError>;
 
-/// Unified error response.
-#[derive(Debug, Serialize)]
-struct ErrorBody {
-    error: String,
-}
-
 struct AppError {
     status: StatusCode,
+    code: &'static str,
     message: String,
+}
+
+impl AppError {
+    /// Creates a new [`AppError`] with the given status, code, and message.
+    fn new(status: StatusCode, code: &'static str, message: impl Into<String>) -> Self {
+        Self {
+            status,
+            code,
+            message: message.into(),
+        }
+    }
+
+    /// Creates a 404 not-found error.
+    fn not_found(resource: impl Into<String>) -> Self {
+        Self::new(
+            StatusCode::NOT_FOUND,
+            "not_found",
+            format!("{} not found", resource.into()),
+        )
+    }
 }
 
 impl IntoResponse for AppError {
     fn into_response(self) -> axum::response::Response {
         (
             self.status,
-            Json(ErrorBody {
-                error: self.message,
-            }),
+            Json(serde_json::json!({
+                "error": {
+                    "code": self.code,
+                    "message": self.message,
+                }
+            })),
         )
             .into_response()
     }
@@ -222,10 +268,11 @@ impl IntoResponse for AppError {
 
 impl From<StorageError> for AppError {
     fn from(e: StorageError) -> Self {
-        Self {
-            status: StatusCode::INTERNAL_SERVER_ERROR,
-            message: e.to_string(),
-        }
+        Self::new(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "internal_error",
+            e.to_string(),
+        )
     }
 }
 
@@ -242,10 +289,7 @@ async fn get_provider(
 ) -> ApiResult<Provider> {
     match state.storage.get_provider(&id).await? {
         Some(p) => Ok(Json(p)),
-        None => Err(AppError {
-            status: StatusCode::NOT_FOUND,
-            message: format!("provider not found: {id}"),
-        }),
+        None => Err(AppError::not_found(format!("provider {id}"))),
     }
 }
 
@@ -265,10 +309,7 @@ async fn list_models(
 async fn get_model(State(state): State<AdminState>, Path(id): Path<String>) -> ApiResult<Model> {
     match state.storage.get_model(&id).await? {
         Some(m) => Ok(Json(m)),
-        None => Err(AppError {
-            status: StatusCode::NOT_FOUND,
-            message: format!("model not found: {id}"),
-        }),
+        None => Err(AppError::not_found(format!("model {id}"))),
     }
 }
 
@@ -291,10 +332,7 @@ async fn get_channel(
 ) -> ApiResult<Channel> {
     match state.storage.get_channel(&id).await? {
         Some(c) => Ok(Json(c)),
-        None => Err(AppError {
-            status: StatusCode::NOT_FOUND,
-            message: format!("channel not found: {id}"),
-        }),
+        None => Err(AppError::not_found(format!("channel {id}"))),
     }
 }
 
@@ -315,28 +353,28 @@ async fn update_channel(
                 .get_channel(&id)
                 .await
                 .map_err(AppError::from)?
-                .ok_or_else(|| AppError {
-                    status: StatusCode::NOT_FOUND,
-                    message: format!("channel not found: {id}"),
-                })?;
+                .ok_or_else(|| AppError::not_found(format!("channel {id}")))?;
             current.protocols
         };
 
-        let entries: Vec<ProtocolEntry> =
-            serde_json::from_str(&protocols_json).map_err(|e| AppError {
-                status: StatusCode::BAD_REQUEST,
-                message: format!("invalid protocols JSON: {e}"),
-            })?;
+        let entries: Vec<ProtocolEntry> = serde_json::from_str(&protocols_json).map_err(|e| {
+            AppError::new(
+                StatusCode::BAD_REQUEST,
+                "bad_request",
+                format!("invalid protocols JSON: {e}"),
+            )
+        })?;
 
         if !entries.iter().any(|e| e.protocol == *fp) {
             let supported: Vec<&str> = entries.iter().map(|e| e.protocol.as_str()).collect();
-            return Err(AppError {
-                status: StatusCode::BAD_REQUEST,
-                message: format!(
+            return Err(AppError::new(
+                StatusCode::BAD_REQUEST,
+                "bad_request",
+                format!(
                     "force_protocol '{fp}' not found in channel protocols. Supported: \
                      {supported:?}"
                 ),
-            });
+            ));
         }
     }
 
@@ -354,10 +392,7 @@ async fn update_channel(
         )
         .await
         .map_err(|e| match &e {
-            StorageError::NotFound(_) => AppError {
-                status: StatusCode::NOT_FOUND,
-                message: format!("channel not found: {id}"),
-            },
+            StorageError::NotFound(_) => AppError::not_found(format!("channel {id}")),
             _ => AppError::from(e),
         })?;
     state.reload_channels().await;
@@ -373,10 +408,7 @@ async fn delete_channel(
         .delete_channel(&id)
         .await
         .map_err(|e| match &e {
-            StorageError::NotFound(_) => AppError {
-                status: StatusCode::NOT_FOUND,
-                message: format!("channel not found: {id}"),
-            },
+            StorageError::NotFound(_) => AppError::not_found(format!("channel {id}")),
             _ => AppError::from(e),
         })?;
     state.reload_channels().await;
@@ -401,16 +433,15 @@ async fn get_channel_protocols(
         .get_channel(&id)
         .await
         .map_err(AppError::from)?
-        .ok_or_else(|| AppError {
-            status: StatusCode::NOT_FOUND,
-            message: format!("channel not found: {id}"),
-        })?;
+        .ok_or_else(|| AppError::not_found(format!("channel {id}")))?;
 
-    let protocols: Vec<ProtocolEntry> =
-        serde_json::from_str(&channel.protocols).map_err(|e| AppError {
-            status: StatusCode::INTERNAL_SERVER_ERROR,
-            message: format!("failed to parse protocols JSON: {e}"),
-        })?;
+    let protocols: Vec<ProtocolEntry> = serde_json::from_str(&channel.protocols).map_err(|e| {
+        AppError::new(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "internal_error",
+            format!("failed to parse protocols JSON: {e}"),
+        )
+    })?;
 
     Ok(Json(ChannelProtocolsResponse {
         channel_id: channel.id,
@@ -460,10 +491,10 @@ async fn query_cost_records(
 async fn set_channel_api_key(
     State(state): State<AdminState>,
     Path(id): Path<String>,
-    Json(body): Json<serde_json::Value>,
+    Json(body): Json<ApiKeyBody>,
 ) -> ApiResult<serde_json::Value> {
-    let key_str = body["apiKey"].as_str().unwrap_or("");
-    let secret = secrecy::SecretString::new(key_str.to_string().into_boxed_str());
+    let key_str = &body.api_key;
+    let secret = secrecy::SecretString::new(key_str.clone().into_boxed_str());
 
     // Persist to DB
     state.storage.set_channel_api_key(&id, &secret).await?;
@@ -505,7 +536,7 @@ async fn admin_health(State(state): State<AdminState>) -> ApiResult<serde_json::
     let healthy_channels = u32::try_from(
         channels
             .iter()
-            .filter(|c| c.enabled && c.health_status == "Healthy")
+            .filter(|c| c.enabled && c.health_status == ChannelHealthStatus::Healthy.as_str())
             .count(),
     )
     .unwrap_or(u32::MAX);
@@ -602,7 +633,7 @@ async fn create_model_mapping(
 async fn update_model_mapping(
     State(state): State<AdminState>,
     Path(id): Path<String>,
-    Json(body): Json<serde_json::Value>,
+    Json(body): Json<UpdateMappingBody>,
 ) -> ApiResult<serde_json::Value> {
     // Fetch existing, update fields, upsert
     let mappings = state
@@ -613,32 +644,29 @@ async fn update_model_mapping(
     let existing = mappings
         .iter()
         .find(|m| m.id == id)
-        .ok_or_else(|| AppError {
-            status: StatusCode::NOT_FOUND,
-            message: format!("mapping not found: {id}"),
-        })?;
+        .ok_or_else(|| AppError::not_found(format!("mapping {id}")))?;
 
     let mut updated = existing.clone();
-    if let Some(v) = body.get("upstreamName").and_then(serde_json::Value::as_str) {
-        updated.upstream_name = v.to_string();
+    if let Some(v) = body.upstream_name {
+        updated.upstream_name = v;
     }
-    if let Some(v) = body.get("clientName").and_then(serde_json::Value::as_str) {
-        updated.client_name = v.to_string();
+    if let Some(v) = body.client_name {
+        updated.client_name = v;
     }
-    if let Some(v) = body.get("billing").and_then(serde_json::Value::as_str) {
-        updated.billing = v.to_string();
+    if let Some(v) = body.billing {
+        updated.billing = v;
     }
-    if let Some(v) = body.get("pricingJson").and_then(serde_json::Value::as_str) {
-        updated.pricing_json = v.to_string();
+    if let Some(v) = body.pricing_json {
+        updated.pricing_json = v;
     }
-    if let Some(v) = body.get("weight").and_then(serde_json::Value::as_u64) {
-        updated.weight = u32::try_from(v).unwrap_or(0);
+    if let Some(v) = body.weight {
+        updated.weight = v;
     }
-    if let Some(v) = body.get("enabled").and_then(serde_json::Value::as_bool) {
+    if let Some(v) = body.enabled {
         updated.enabled = v;
     }
-    if let Some(v) = body.get("protocols").and_then(serde_json::Value::as_str) {
-        updated.protocols = v.to_string();
+    if let Some(v) = body.protocols {
+        updated.protocols = v;
     }
 
     state.storage.upsert_mapping(&updated).await?;
@@ -656,10 +684,7 @@ async fn delete_model_mapping(
         .delete_mapping(&id)
         .await
         .map_err(|e| match &e {
-            StorageError::NotFound(_) => AppError {
-                status: StatusCode::NOT_FOUND,
-                message: format!("mapping not found: {id}"),
-            },
+            StorageError::NotFound(_) => AppError::not_found(format!("mapping {id}")),
             _ => AppError::from(e),
         })?;
     state.reload_channels().await;
@@ -692,10 +717,7 @@ async fn delete_model_alias_handler(
         .delete_model_alias(id)
         .await
         .map_err(|e| match &e {
-            StorageError::NotFound(_) => AppError {
-                status: StatusCode::NOT_FOUND,
-                message: format!("alias not found: {id}"),
-            },
+            StorageError::NotFound(_) => AppError::not_found(format!("alias {id}")),
             _ => AppError::from(e),
         })?;
     Ok(Json(serde_json::json!({"deleted": true})))
@@ -906,17 +928,12 @@ async fn compress_status(State(state): State<AdminState>) -> ApiResult<serde_jso
 /// Body: `{"enabled": true}` or `{"enabled": false}`
 async fn compress_toggle(
     State(state): State<AdminState>,
-    Json(body): Json<serde_json::Value>,
+    Json(body): Json<CompressToggleBody>,
 ) -> ApiResult<serde_json::Value> {
-    if let Some(enabled) = body.get("enabled").and_then(serde_json::Value::as_bool) {
-        state.compress_enabled.store(enabled, Ordering::Relaxed);
-        Ok(Json(serde_json::json!({"enabled": enabled})))
-    } else {
-        Err(AppError {
-            status: StatusCode::BAD_REQUEST,
-            message: r#"missing required field: "enabled" (bool)"#.to_string(),
-        })
-    }
+    state
+        .compress_enabled
+        .store(body.enabled, Ordering::Relaxed);
+    Ok(Json(serde_json::json!({"enabled": body.enabled})))
 }
 
 #[cfg(test)]

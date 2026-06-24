@@ -94,11 +94,12 @@ impl CostMiddleware {
         // Upstream model name sent to the API (e.g. "deepseek-v4-pro")
         let upstream_model = mapping_info.map_or(String::new(), |m| m.upstream_name.clone());
 
-        // Auto-detect format instead of using ctx.target_protocol:
-        // when bridge middleware converts the response body (e.g. OpenAI→Anthropic),
-        // the usage field names change (prompt_tokens→input_tokens), so target_protocol
-        // no longer matches the actual body format. Auto-detect handles both formats.
-        let usage = extract_usage(response_body, None);
+        // Use the client-detected format for usage extraction.
+        // After bridge conversion, the response body is in the client's format
+        // (detected_format), not the upstream's format (target_protocol).
+        // Fall back to auto-detection if detected_format is None (should not
+        // normally happen since non-matching paths are rejected before proxying).
+        let usage = extract_usage(response_body, ctx.detected_format);
 
         // Compute actual cost from pricing
         let (actual_cost, unit) = match mapping_info.and_then(|m| m.pricing.as_ref()) {
@@ -234,10 +235,17 @@ fn auto_detect_usage(body: &serde_json::Value) -> Usage {
     let Some(usage) = body.get("usage") else {
         return Usage::default();
     };
-    // Anthropic has `input_tokens` but no `prompt_tokens`; OAI Chat has `prompt_tokens`
+    // OpenAI Chat uses `prompt_tokens`; Anthropic and Responses use `input_tokens`.
     if usage.get("prompt_tokens").is_some() {
         return extract_openai_chat(body);
     }
+    // OpenAI Responses has `input_tokens_details` (not present in Anthropic).
+    if usage.get("input_tokens_details").is_some() {
+        return extract_openai_responses(body);
+    }
+    // Anthropic has `cache_creation_input_tokens`; also the default fallback
+    // when only `input_tokens` is present (both Anthropic and Responses share
+    // the field name, but Anthropic is more common).
     if usage.get("input_tokens").is_some() {
         return extract_anthropic(body);
     }
@@ -527,13 +535,12 @@ fn calc_per_token(
 
 /// Calculates cost using a tiered token pricing schedule.
 ///
-/// Selects the first tier whose `up_to` bound covers the total token count.
+/// Selects the first tier whose `up_to` bound covers the main token count
+/// (input + output). Cache and thinking tokens are excluded from tier
+/// selection because they are priced separately at lower rates and should
+/// not push a request into a more expensive tier.
 fn calc_tiered_tokens(usage: &Usage, tiers: &[PricingTier], currency: &str) -> (f64, String) {
-    let total_tokens = usage.input_tokens
-        + usage.output_tokens
-        + usage.cache_write_tokens
-        + usage.cache_read_tokens
-        + usage.thinking_tokens;
+    let total_tokens = usage.input_tokens + usage.output_tokens;
     let tier = tiers.iter().find(|t| match t.up_to {
         None => true,
         Some(limit) => total_tokens <= limit,
@@ -647,6 +654,38 @@ mod tests {
         let usage = extract_usage(&body, None);
         assert_eq!(usage.input_tokens, 100);
         assert_eq!(usage.output_tokens, 50);
+    }
+
+    #[test]
+    fn test_should_autodetect_openai_responses_via_input_tokens_details() {
+        let body = serde_json::json!({
+            "usage": {
+                "input_tokens": 1200,
+                "output_tokens": 400,
+                "input_tokens_details": { "cached_tokens": 500 }
+            }
+        });
+        let usage = extract_usage(&body, None);
+        assert_eq!(usage.input_tokens, 1200);
+        assert_eq!(usage.output_tokens, 400);
+        assert_eq!(usage.cache_read_tokens, 500);
+    }
+
+    #[test]
+    fn test_should_autodetect_anthropic_via_cache_creation_tokens() {
+        let body = serde_json::json!({
+            "usage": {
+                "input_tokens": 1500,
+                "output_tokens": 300,
+                "cache_creation_input_tokens": 500,
+                "cache_read_input_tokens": 200
+            }
+        });
+        let usage = extract_usage(&body, None);
+        assert_eq!(usage.input_tokens, 1500);
+        assert_eq!(usage.output_tokens, 300);
+        assert_eq!(usage.cache_write_tokens, 500);
+        assert_eq!(usage.cache_read_tokens, 200);
     }
 
     // ── Streaming extraction ────────────────────────────────────

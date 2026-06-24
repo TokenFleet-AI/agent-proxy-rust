@@ -1,6 +1,42 @@
 use secrecy::{ExposeSecret, SecretString};
 use serde::{Deserialize, Serialize};
 
+/// Channel health status stored in the database.
+///
+/// Represents the operational state of a channel as persisted in the
+/// `health_status` column. Transitions are driven by failure recording
+/// and manual admin overrides.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ChannelHealthStatus {
+    /// Channel is operating normally.
+    Healthy,
+    /// Channel has seen failures but is still being tried.
+    Degraded,
+    /// Channel is in cooldown after repeated failures.
+    Cooldown,
+    /// Channel has no API key and cannot be used.
+    Unavailable,
+}
+
+impl ChannelHealthStatus {
+    /// Returns the string representation used for database storage.
+    #[must_use]
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Healthy => "Healthy",
+            Self::Degraded => "Degraded",
+            Self::Cooldown => "Cooldown",
+            Self::Unavailable => "Unavailable",
+        }
+    }
+}
+
+impl std::fmt::Display for ChannelHealthStatus {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
 /// An upstream AI provider (e.g. "Anthropic", "`OpenAI`").
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -70,7 +106,7 @@ pub struct Channel {
     pub created_at: i64,
     /// When the channel was last modified (unix timestamp).
     pub updated_at: i64,
-    /// Current health status: "Healthy", "Degraded", or "Cooldown".
+    /// Current health status: see [`ChannelHealthStatus`].
     pub health_status: String,
     /// If in cooldown, when it ends (RFC 3339).
     pub cooldown_until: Option<String>,

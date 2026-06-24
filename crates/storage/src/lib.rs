@@ -16,10 +16,10 @@ use async_trait::async_trait;
 pub use error::StorageError;
 use secrecy::SecretString;
 pub use types::{
-    AvailableChannelInfo, AvailableModelInfo, Channel, CompressionSavingsReport, CostAggregate,
-    CostFilter, CostGroupBy, CostRecord, Model, ModelAlias, ModelAliasRequest, ModelMapping,
-    ProtocolEntry, Provider, SeedEntryStatus, SeedManifest, SeedManifestEntry, SeedStatus,
-    SubscriptionFee, SwitchLog, TimeRange,
+    AvailableChannelInfo, AvailableModelInfo, Channel, ChannelHealthStatus,
+    CompressionSavingsReport, CostAggregate, CostFilter, CostGroupBy, CostRecord, Model,
+    ModelAlias, ModelAliasRequest, ModelMapping, ProtocolEntry, Provider, SeedEntryStatus,
+    SeedManifest, SeedManifestEntry, SeedStatus, SubscriptionFee, SwitchLog, TimeRange,
 };
 
 /// Backend-agnostic storage for providers, models, channels, and cost records.

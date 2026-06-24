@@ -11,15 +11,18 @@
 
 ## 错误响应格式
 
-所有错误返回统一 JSON 结构：
+所有错误返回统一 JSON 结构（与 proxy 端保持一致）：
 
 ```json
 {
-  "error": "error message"
+  "error": {
+    "code": "not_found",
+    "message": "provider not found: deepseek"
+  }
 }
 ```
 
-标准 HTTP 状态码：`400`（请求错误）、`401`（未授权）、`404`（未找到）、`409`（冲突）、`500`（内部错误）。
+标准 HTTP 状态码：`400`（请求错误，code=`bad_request`）、`401`（未授权，code=`unauthorized`）、`404`（未找到，code=`not_found`）、`409`（冲突）、`500`（内部错误，code=`internal_error`）。
 
 ---
 
@@ -125,7 +128,7 @@
   "priority": 10,
   "monthlyQuota": 1000000,
   "quotaPolicy": "Block",
-  "protocols": "[{\"protocol\":\"openai_chat\",\"base_url\":\"https://api.openai.com\"}]",
+  "protocols": "[{\"protocol\":\"openai_chat\",\"baseUrl\":\"https://api.openai.com\"}]",
   "forceProtocol": "openai_chat"
 }
 ```
@@ -455,10 +458,10 @@
 
 ## 元信息
 
-- 基于 commit：`642f0c3`（`perf: downgrade verbose request logs from info to debug`）
+- 基于 commit：`8c42dda`（`docs: update CHANGELOG for v1.0.1`）
 - 源码来源：`apps/server/src/admin.rs`、`apps/server/src/admin_auth.rs`、`crates/core/src/server.rs`
 - 设计规范：`specs/0016-admin-api-extension.md`
-- 生成日期：2026-06-12
+- 生成日期：2026-06-24
 
 ---
 

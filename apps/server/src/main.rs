@@ -57,19 +57,24 @@ async fn main() -> Result<()> {
     let channels_swap = model_router.channels_swap();
 
     let admin_key = admin_auth::resolve_admin_key();
+    if admin_key.generated {
+        tracing::warn!(
+            "auto-generated admin key — set AGENT_PROXY_ADMIN_KEY to avoid this. \
+             Key (first 8 chars): {}...",
+            &admin_key.key[..8]
+        );
+    }
     let compress = CompressMiddleware::new();
     let compress_enabled = compress.enabled_flag();
     let admin = admin::admin_routes(
         storage.clone(),
         seed,
-        Some(admin_key.clone()),
+        Some(admin_key.key.clone()),
         health_map,
         api_key_map,
         compress_enabled,
         channels_swap,
     );
-
-    eprintln!("[agent-proxy] Admin key: {admin_key}");
 
     let proxy_api_key = std::env::var("AGENT_PROXY_API_KEY")
         .ok()

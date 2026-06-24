@@ -39,6 +39,8 @@ enum ConversionDirection {
     OpenaiToAnthropic,
     /// Client sends `OpenAI` Responses, upstream expects Anthropic.
     ResponsesToAnthropic,
+    /// Client sends `OpenAI` Responses, upstream expects `OpenAI` Chat.
+    ResponsesToOpenai,
     /// No conversion needed — same protocol on both sides.
     Passthrough,
 }
@@ -56,6 +58,7 @@ impl ConversionDirection {
             (ApiFormat::OpenaiResponses, ApiFormat::AnthropicMessages) => {
                 Self::ResponsesToAnthropic
             }
+            (ApiFormat::OpenaiResponses, ApiFormat::OpenaiChat) => Self::ResponsesToOpenai,
             // Future protocol pairs fall through to passthrough.
             _ => Self::Passthrough,
         }
@@ -323,6 +326,9 @@ fn convert_request(
         ConversionDirection::ResponsesToAnthropic => {
             llm_bridge_core::transform::responses_to_anthropic(bridge_req)
         }
+        ConversionDirection::ResponsesToOpenai => {
+            llm_bridge_core::transform::responses_to_openai(bridge_req)
+        }
         ConversionDirection::Passthrough => unreachable!("passthrough handled earlier"),
     }
     .map_err(|e: TransformError| ProxyError::BadRequest(e.sanitized_message()))
@@ -346,6 +352,22 @@ fn convert_response(
         ConversionDirection::ResponsesToAnthropic => {
             // `OpenAI` Responses response → Anthropic uses the same reverse transform
             llm_bridge_core::transform::openai_response_to_anthropic_message(bridge_req)
+        }
+        ConversionDirection::ResponsesToOpenai => {
+            // Reverse: OpenAI Chat response → OpenAI Responses response
+            // Compose: Chat → Anthropic → Responses
+            match llm_bridge_core::transform::openai_response_to_anthropic_message(bridge_req) {
+                Ok(intermediate) => {
+                    llm_bridge_core::transform::anthropic_response_to_responses_response(
+                        &TransformRequest {
+                            headers: intermediate.headers,
+                            path: intermediate.path,
+                            body: intermediate.body,
+                        },
+                    )
+                }
+                Err(e) => Err(e),
+            }
         }
         ConversionDirection::Passthrough => unreachable!("passthrough handled earlier"),
     }

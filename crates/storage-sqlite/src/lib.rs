@@ -9,9 +9,10 @@
 use std::fmt::Write;
 
 use agent_proxy_rust_storage::{
-    AvailableChannelInfo, AvailableModelInfo, Channel, CostAggregate, CostFilter, CostGroupBy,
-    CostRecord, Model, ModelAlias, ModelAliasRequest, ModelMapping, Provider, SeedManager,
-    SeedStatus, Storage, StorageError, SubscriptionFee, SwitchLog, TimeRange,
+    AvailableChannelInfo, AvailableModelInfo, Channel, ChannelHealthStatus, CostAggregate,
+    CostFilter, CostGroupBy, CostRecord, Model, ModelAlias, ModelAliasRequest, ModelMapping,
+    Provider, SeedManager, SeedStatus, Storage, StorageError, SubscriptionFee, SwitchLog,
+    TimeRange,
 };
 use async_trait::async_trait;
 use r2d2::Pool;
@@ -45,9 +46,22 @@ impl SqliteStorage {
     pub fn new(path: &std::path::Path) -> Result<Self, StorageError> {
         let manager = SqliteConnectionManager::file(path);
         let pool = Pool::builder()
-            .max_size(4)
+            .max_size(16)
+            .connection_timeout(std::time::Duration::from_secs(5))
             .build(manager)
             .map_err(|e| StorageError::Connection(format!("failed to create pool: {e}")))?;
+        // Enable WAL mode and busy_timeout on every connection for
+        // better concurrent read/write performance.
+        {
+            let conn = pool
+                .get()
+                .map_err(|e| StorageError::Connection(e.to_string()))?;
+            conn.execute_batch(
+                "PRAGMA journal_mode=WAL;
+                 PRAGMA busy_timeout=5000;",
+            )
+            .map_err(|e| StorageError::Connection(format!("failed to set pragmas: {e}")))?;
+        }
         debug!(path = %path.display(), "SQLite database opened");
         Ok(Self { pool })
     }
@@ -62,7 +76,8 @@ impl SqliteStorage {
     pub fn new_in_memory() -> Result<Self, StorageError> {
         let manager = SqliteConnectionManager::memory();
         let pool = Pool::builder()
-            .max_size(4)
+            .max_size(16)
+            .connection_timeout(std::time::Duration::from_secs(5))
             .build(manager)
             .map_err(|e| StorageError::Connection(format!("failed to create pool: {e}")))?;
         debug!("SQLite in-memory database opened");
@@ -84,7 +99,7 @@ impl SqliteStorage {
         let health_status: String = row.get(9)?;
         // Override: channels without API key are always Unavailable.
         let effective_health = if api_key_str.is_empty() {
-            "Unavailable".to_string()
+            ChannelHealthStatus::Unavailable.as_str().to_string()
         } else {
             health_status
         };
@@ -612,9 +627,9 @@ impl Storage for SqliteStorage {
                 .map_err(|e| StorageError::Connection(e.to_string()))?;
             let rows = conn
                 .execute(
-                    "UPDATE channels SET health_status = 'Healthy', cooldown_until = NULL, \
-                     consecutive_failures = 0, updated_at = ?1 WHERE id = ?2",
-                    params![now, id],
+                    "UPDATE channels SET health_status = ?1, cooldown_until = NULL, \
+                     consecutive_failures = 0, updated_at = ?2 WHERE id = ?3",
+                    params![ChannelHealthStatus::Healthy.as_str(), now, id],
                 )
                 .map_err(|e| StorageError::Backend(e.to_string()))?;
             if rows == 0 {
@@ -656,28 +671,27 @@ impl Storage for SqliteStorage {
                 .map_err(|e| StorageError::Backend(e.to_string()))?;
 
             let status = if failures >= 3 {
-                "Cooldown"
+                ChannelHealthStatus::Cooldown
             } else if failures >= 1 {
-                "Degraded"
+                ChannelHealthStatus::Degraded
             } else {
-                "Healthy"
+                ChannelHealthStatus::Healthy
             };
 
-            let cooldown_sql = if status == "Cooldown" {
-                format!(
-                    ", cooldown_until = '{}'",
+            let cooldown_until: Option<String> = if status == ChannelHealthStatus::Cooldown {
+                Some(
                     chrono::Utc::now()
                         .checked_add_signed(chrono::Duration::minutes(5))
                         .unwrap_or(chrono::Utc::now())
-                        .to_rfc3339()
+                        .to_rfc3339(),
                 )
             } else {
-                String::new()
+                None
             };
 
             conn.execute(
-                &format!("UPDATE channels SET health_status = ?1 {cooldown_sql} WHERE id = ?2"),
-                params![status, id],
+                "UPDATE channels SET health_status = ?1, cooldown_until = ?2 WHERE id = ?3",
+                params![status.as_str(), cooldown_until, id],
             )
             .map_err(|e| StorageError::Backend(e.to_string()))?;
 
@@ -1155,7 +1169,7 @@ impl Storage for SqliteStorage {
 
             sql.push_str(" ORDER BY timestamp DESC");
 
-            let limit = filter.limit.unwrap_or(100);
+            let limit = filter.limit.unwrap_or(100).min(1000);
             let offset = filter.offset.unwrap_or(0);
             let _ = write!(sql, " LIMIT {limit} OFFSET {offset}");
 
@@ -1637,7 +1651,7 @@ impl Storage for SqliteStorage {
     }
 
     fn max_connections(&self) -> usize {
-        4
+        16
     }
 }
 
@@ -2068,7 +2082,11 @@ mod tests {
             .unwrap();
         let aliases = storage.list_model_aliases().await.unwrap();
         // 5 seed aliases from migration + 1 new (gpt-4o, since gpt-5.5 already existed)
-        assert!(aliases.len() >= 3, "expected at least 3 aliases (seed + test), got {}", aliases.len());
+        assert!(
+            aliases.len() >= 3,
+            "expected at least 3 aliases (seed + test), got {}",
+            aliases.len()
+        );
     }
 
     #[tokio::test]

@@ -184,7 +184,10 @@ async fn test_mark_channel_healthy() {
 async fn test_record_channel_failure_sequence() {
     let storage = setup().await;
     let secret = secrecy::SecretString::from("sk-test-key".to_string());
-    storage.set_channel_api_key("deepseek", &secret).await.unwrap();
+    storage
+        .set_channel_api_key("deepseek", &secret)
+        .await
+        .unwrap();
     // 1st failure → Degraded
     storage.record_channel_failure("deepseek").await.unwrap();
     let ch = storage.get_channel("deepseek").await.unwrap().unwrap();
@@ -377,8 +380,8 @@ async fn test_health_check_returns_true() {
 
 #[tokio::test]
 #[serial]
-async fn test_max_connections_is_four() {
-    assert_eq!(setup().await.max_connections(), 4);
+async fn test_max_connections_is_sixteen() {
+    assert_eq!(setup().await.max_connections(), 16);
 }
 
 #[tokio::test]
