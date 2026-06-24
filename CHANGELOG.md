@@ -13,6 +13,10 @@ All notable changes to this project will be documented in this file. See [conven
 
 - real health probe with cheapest model, 429 30s retry - ([8c26ce2](https://github.com/commit/8c26ce237156d882c284234b98988ba142a73ac4)) - baoyx
 
+### Dependencies
+
+- bump tokenless-schema to 1.2 in compress crate
+
 ---
 ## [1.0.1](https://github.com/compare/v1.0.0..v1.0.1) - 2026-06-12
 
