@@ -162,7 +162,7 @@
 
 #### `PUT /admin/channels/{id}/api-key`
 
-设置或更新通道 API 密钥。密钥会持久化到数据库并同步到内存，立即生效。
+设置或更新通道 API 密钥。密钥会持久化到数据库、同步到内存，并**立即触发一次真实健康探测**（使用该通道价格最低模型发送 `max_tokens=1` 的请求）。
 
 **请求体：**
 ```json
@@ -171,7 +171,74 @@
 
 空字符串会清除密钥并将通道标记为不健康。
 
-**响应：** `{"status": "ok"}`
+**响应（设置有效 key）：**
+```json
+{
+  "status": "ok",
+  "probe": {
+    "result": "healthy",
+    "model": "deepseek-v4-flash",
+    "latencyMs": 230,
+    "httpStatus": 200
+  }
+}
+```
+
+**响应（清除 key）：**
+```json
+{"status": "ok", "probe": null}
+```
+
+**响应（密钥无效）：**
+```json
+{
+  "status": "ok",
+  "probe": {
+    "result": "invalid_key",
+    "model": "deepseek-v4-flash",
+    "latencyMs": 150,
+    "httpStatus": 401
+  }
+}
+```
+
+`probe.result` 可能值：`healthy` / `invalid_key` / `rate_limited` / `unreachable` / `no_models` / `no_protocols` / `unknown`。
+
+#### `POST /admin/channels/{id}/probe`
+
+手动触发一次真实健康探测。发送 `max_tokens=1` 的最小请求到上游，使用该通道绑定的价格最低模型。
+
+**响应（探测成功）：**
+```json
+{
+  "result": "healthy",
+  "model": "deepseek-v4-flash",
+  "latencyMs": 230,
+  "httpStatus": 200
+}
+```
+
+**响应（上游不可达）：**
+```json
+{
+  "result": "unreachable",
+  "model": "deepseek-v4-flash",
+  "latencyMs": 5000,
+  "httpStatus": 0
+}
+```
+
+**响应（通道无可用模型）：**
+```json
+{
+  "result": "no_models",
+  "model": "",
+  "latencyMs": 0,
+  "httpStatus": 0
+}
+```
+
+探测成功（`healthy` / `rate_limited`）会自动标记通道为健康；`invalid_key` / `unreachable` / `unknown` 会标记为不健康。
 
 #### `GET /admin/channels/{id}/protocols`
 
@@ -443,7 +510,7 @@
 | 健康检查 | 2 |
 | Providers | 2 |
 | Models | 2 |
-| Channels | 8 |
+| Channels | 9 |
 | Model Mappings | 4 |
 | Model Aliases | 3 |
 | Available Channels | 1 |
@@ -452,14 +519,14 @@
 | Switch Logs | 1 |
 | Seed Data | 2 |
 | Compress | 2 |
-| **合计** | **33** |
+| **合计** | **34** |
 
 ---
 
 ## 元信息
 
 - 基于 commit：`8c42dda`（`docs: update CHANGELOG for v1.0.1`）
-- 源码来源：`apps/server/src/admin.rs`、`apps/server/src/admin_auth.rs`、`crates/core/src/server.rs`
+- 源码来源：`apps/server/src/admin.rs`、`apps/server/src/admin_auth.rs`、`apps/server/src/health_probe.rs`、`crates/core/src/server.rs`
 - 设计规范：`specs/0016-admin-api-extension.md`
 - 生成日期：2026-06-24
 

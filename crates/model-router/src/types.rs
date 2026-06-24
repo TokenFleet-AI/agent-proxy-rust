@@ -364,6 +364,38 @@ impl ChannelState {
         self.failed_at = Some(Instant::now());
     }
 
+    /// Marks the channel as rate-limited with a short fixed cooldown.
+    ///
+    /// Used for HTTP 429 responses. Sets a 30-second cooldown so the
+    /// channel is retried quickly without exponential backoff.
+    pub fn mark_rate_limited(&mut self) {
+        self.consecutive_failures = 1;
+        self.health = ChannelHealth::Unhealthy;
+        self.failed_at = Some(Instant::now());
+    }
+
+    /// Returns `true` when the channel can be tried after the cooldown has passed.
+    ///
+    /// Rate-limited channels (1 failure) use a 30-second cooldown.
+    /// Other failures use exponential backoff based on `base_cooldown`.
+    #[must_use]
+    pub fn is_tryable_past_cooldown(&self) -> bool {
+        const RATE_LIMIT_COOLDOWN: Duration = Duration::from_secs(30);
+        const BASE_COOLDOWN: Duration = Duration::from_secs(60);
+
+        match self.health {
+            ChannelHealth::Healthy => true,
+            ChannelHealth::Unhealthy => {
+                let effective = if self.consecutive_failures <= 1 {
+                    RATE_LIMIT_COOLDOWN
+                } else {
+                    exponential_cooldown(self.consecutive_failures, BASE_COOLDOWN)
+                };
+                self.failed_at.is_none_or(|t| t.elapsed() >= effective)
+            }
+        }
+    }
+
     /// Returns `true` when the channel can be tried.
     #[must_use]
     pub fn is_tryable(&self, base_cooldown: Duration) -> bool {

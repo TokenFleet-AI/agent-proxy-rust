@@ -2,6 +2,7 @@
 
 mod admin;
 mod admin_auth;
+mod health_probe;
 
 use std::{path::PathBuf, sync::Arc};
 

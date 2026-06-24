@@ -10,7 +10,7 @@
 
 mod types;
 
-use std::{sync::Arc, time::Duration};
+use std::sync::Arc;
 
 use agent_proxy_rust_core::{
     ProxyError,
@@ -28,9 +28,6 @@ pub use types::{
     BillingDimension, ChannelBilling, ChannelHealth, ChannelState, ExhaustedAction, Pricing,
     PricingTier, Quota, QuotaUsage, TierPrice,
 };
-
-/// Cooldown period before an unhealthy channel is retried.
-const COOLDOWN: Duration = Duration::from_secs(60);
 
 /// Parsed in-memory representation of a channel with its model mappings.
 #[derive(Debug, Clone)]
@@ -381,13 +378,13 @@ impl ModelRouterMiddleware {
     fn is_healthy(&self, channel_id: &str) -> bool {
         self.health
             .get(channel_id)
-            .is_none_or(|s| s.is_tryable(COOLDOWN))
+            .is_none_or(|s| s.is_tryable_past_cooldown())
     }
 
     fn is_tryable_past_cooldown(&self, channel_id: &str) -> bool {
         self.health
             .get(channel_id)
-            .is_none_or(|s| s.is_tryable(COOLDOWN))
+            .is_none_or(|s| s.is_tryable_past_cooldown())
     }
 
     fn mark_healthy(&self, channel_id: &str) {
@@ -397,10 +394,20 @@ impl ModelRouterMiddleware {
     }
 
     /// Records a request failure. After 3 consecutive failures the
-    /// channel is marked Unhealthy with a 60 s cooldown.
+    /// channel is marked Unhealthy with exponential backoff.
+    #[allow(dead_code)]
     fn record_failure(&self, channel_id: &str) {
         let mut state = self.health.entry(channel_id.to_owned()).or_default();
         state.record_failure();
+    }
+
+    /// Marks a channel as rate-limited with a short cooldown.
+    ///
+    /// The channel will be retried after 30 seconds instead of the
+    /// regular exponential backoff.
+    fn mark_rate_limited(&self, channel_id: &str) {
+        let mut state = self.health.entry(channel_id.to_owned()).or_default();
+        state.mark_rate_limited();
     }
 
     /// Forces a channel to Unhealthy immediately (e.g. 5xx server error).
@@ -695,12 +702,12 @@ impl ProxyMiddleware for ModelRouterMiddleware {
                 "client error, not counting as channel failure"
             );
         } else if res.status == http::StatusCode::TOO_MANY_REQUESTS {
-            // 429: rate limit — counts as a failure
+            // 429: rate limit — short cooldown, retry quickly
             warn!(
                 channel = %channel_id,
-                "upstream 429 rate limit, recording failure"
+                "upstream 429 rate limit, applying 30s cooldown"
             );
-            self.record_failure(&channel_id);
+            self.mark_rate_limited(&channel_id);
         } else {
             // 2xx: success
             self.mark_healthy(&channel_id);

@@ -153,6 +153,7 @@ dependencies = [
  "dashmap",
  "dirs",
  "rand 0.8.6",
+ "reqwest",
  "secrecy",
  "serde",
  "serde_json",

@@ -96,6 +96,7 @@ pub fn admin_routes(
         .route("/admin/channels/{id}/healthy", post(mark_channel_healthy))
         .route("/admin/channels/{id}/failure", post(record_channel_failure))
         .route("/admin/channels/{id}/api-key", put(set_channel_api_key))
+        .route("/admin/channels/{id}/probe", post(probe_channel_handler))
         .route("/admin/channels/{id}/protocols", get(get_channel_protocols))
         // Cost
         .route("/admin/cost-records", get(query_cost_records))
@@ -498,7 +499,6 @@ async fn set_channel_api_key(
 
     // Persist to DB
     state.storage.set_channel_api_key(&id, &secret).await?;
-    state.storage.mark_channel_healthy(&id).await?;
 
     // Update in-memory shared maps so the router picks up the new key
     // and health status without a restart.
@@ -510,13 +510,87 @@ async fn set_channel_api_key(
             .entry(id.clone())
             .or_default()
             .mark_unhealthy();
-    } else {
-        state.api_key_map.insert(id.clone(), secret);
-        // Mark healthy in memory: user just provided a valid key
-        state.health_map.remove(&id);
+
+        // Update DB status to Unavailable
+        let _ = state.storage.record_channel_failure(&id).await;
+
+        return Ok(Json(serde_json::json!({"status": "ok", "probe": null})));
     }
 
-    Ok(Json(serde_json::json!({"status": "ok"})))
+    state.api_key_map.insert(id.clone(), secret);
+
+    // Run a real health probe to verify the key and upstream connectivity
+    let channel = state
+        .storage
+        .get_channel(&id)
+        .await
+        .map_err(AppError::from)?
+        .ok_or_else(|| AppError::not_found(format!("channel {id}")))?;
+
+    let probe = crate::health_probe::probe_channel(state.storage.as_ref(), &channel).await;
+
+    // Update health status based on probe result
+    if probe.result.is_healthy() {
+        state.health_map.remove(&id);
+        let _ = state.storage.mark_channel_healthy(&id).await;
+    } else {
+        state
+            .health_map
+            .entry(id.clone())
+            .or_default()
+            .mark_unhealthy();
+    }
+
+    Ok(Json(serde_json::json!({
+        "status": "ok",
+        "probe": {
+            "result": probe.result,
+            "model": probe.model,
+            "latencyMs": probe.latency_ms,
+            "httpStatus": probe.http_status,
+        }
+    })))
+}
+
+/// `POST /admin/channels/{id}/probe`
+///
+/// Sends a real health probe to the channel's upstream using the
+/// cheapest bound model. Returns the probe result and updates
+/// the channel's health status accordingly.
+async fn probe_channel_handler(
+    State(state): State<AdminState>,
+    Path(id): Path<String>,
+) -> ApiResult<serde_json::Value> {
+    let channel = state
+        .storage
+        .get_channel(&id)
+        .await
+        .map_err(AppError::from)?
+        .ok_or_else(|| AppError::not_found(format!("channel {id}")))?;
+
+    let probe = crate::health_probe::probe_channel(state.storage.as_ref(), &channel).await;
+
+    // Update health status based on probe result
+    if probe.result.is_healthy() {
+        state.health_map.remove(&id);
+        let _ = state.storage.mark_channel_healthy(&id).await;
+    } else if !matches!(
+        probe.result,
+        crate::health_probe::ProbeResult::NoModels | crate::health_probe::ProbeResult::NoProtocols
+    ) {
+        state
+            .health_map
+            .entry(id.clone())
+            .or_default()
+            .mark_unhealthy();
+    }
+
+    Ok(Json(serde_json::json!({
+        "result": probe.result,
+        "model": probe.model,
+        "latencyMs": probe.latency_ms,
+        "httpStatus": probe.http_status,
+    })))
 }
 
 // ── Model Mappings ────────────────────────────────────────────────────────────
