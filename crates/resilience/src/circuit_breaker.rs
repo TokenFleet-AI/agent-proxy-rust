@@ -31,6 +31,7 @@ pub struct CircuitBreakerConfig {
 }
 
 impl Default for CircuitBreakerConfig {
+    #[allow(unknown_lints, clippy::duration_suboptimal_units)]
     fn default() -> Self {
         Self {
             failure_threshold: 3,
@@ -191,7 +192,13 @@ impl ProxyMiddleware for CircuitBreakerMiddleware {
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
+#[allow(
+    unknown_lints,
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::panic,
+    clippy::duration_suboptimal_units
+)]
 mod tests {
     use std::time::Duration;
 

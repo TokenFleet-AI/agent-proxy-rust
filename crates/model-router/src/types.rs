@@ -436,10 +436,8 @@ pub fn exponential_cooldown(consecutive_failures: u32, base: Duration) -> Durati
 
 #[cfg(test)]
 #[allow(
-    unknown_lints,
     clippy::unwrap_used,
     clippy::unwrap_in_result,
-    clippy::unchecked_duration_subtraction,
     clippy::unchecked_time_subtraction,
     clippy::duration_suboptimal_units,
     clippy::panic
