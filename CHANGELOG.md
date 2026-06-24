@@ -3,11 +3,23 @@
 All notable changes to this project will be documented in this file. See [conventional commits](https://www.conventionalcommits.org/) for commit guidelines.
 
 ---
+## [1.1.0](https://github.com/compare/v1.0.1..v1.1.0) - 2026-06-24
+
+### Bug Fixes
+
+- security hardening, API consistency, and quality improvements - ([f314aa8](https://github.com/commit/f314aa83d1053de34e49ca7975cb17798f3eccf2)) - baoyx
+
+### Features
+
+- real health probe with cheapest model, 429 30s retry - ([8c26ce2](https://github.com/commit/8c26ce237156d882c284234b98988ba142a73ac4)) - baoyx
+
+---
 ## [1.0.1](https://github.com/compare/v1.0.0..v1.0.1) - 2026-06-12
 
 ### Documentation
 
 - comprehensive documentation overhaul - ([18b54f5](https://github.com/commit/18b54f5b7d011346dea4c7e5ea2f1e15997f575c)) - baoyx
+- update CHANGELOG for v1.0.1 - ([8c42dda](https://github.com/commit/8c42dda4412c32cc4eb8dd0a00694ae6762b5fe7)) - baoyx
 
 ### Miscellaneous Chores
 
