@@ -526,6 +526,11 @@ impl ProxyMiddleware for ModelRouterMiddleware {
             .unwrap_or_default();
 
         if client_name.is_empty() {
+            debug!(
+                path = %req.path,
+                body = %String::from_utf8_lossy(&req.body),
+                "request body missing 'model' field"
+            );
             return Err(ProxyError::BadRequest(
                 "request body missing 'model' field".into(),
             ));

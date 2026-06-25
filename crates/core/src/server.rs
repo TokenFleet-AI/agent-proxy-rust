@@ -337,6 +337,16 @@ async fn handle_proxy_request(
 
     let mut ctx = ConnectionContext::new(request_id, agent_type, agent_role, detected_format);
 
+    // ── Debug: log raw incoming request before middleware ──────────
+    tracing::debug!(
+        request_id = ctx.request_id,
+        path = %proxy_req.path,
+        agent_type = %agent_type,
+        detected_format = ?detected_format,
+        body = %String::from_utf8_lossy(&proxy_req.body),
+        "incoming proxy request"
+    );
+
     // ── Session correlation: extract header + consume tokenless report ──
     let session_id = proxy_req
         .headers
