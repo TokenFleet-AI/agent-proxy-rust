@@ -59,6 +59,7 @@ impl ConversionDirection {
                 Self::ResponsesToAnthropic
             }
             (ApiFormat::OpenaiResponses, ApiFormat::OpenaiChat) => Self::ResponsesToOpenai,
+            (ApiFormat::OpenaiChat, ApiFormat::OpenaiResponses) => Self::ResponsesToOpenai,
             // Future protocol pairs fall through to passthrough.
             _ => Self::Passthrough,
         }
@@ -98,6 +99,14 @@ impl BridgeMiddleware {
     ) -> Result<(), ProxyError> {
         let mut state = StreamState::default();
 
+        debug!(
+            ?client_format,
+            ?upstream_format,
+            body_len = res.body.len(),
+            upstream_body = %String::from_utf8_lossy(&res.body),
+            "bridge: streaming response before conversion"
+        );
+
         let output: Vec<u8> = match client_format {
             ApiFormat::AnthropicMessages => {
                 llm_bridge_core::stream::transform_stream_to_anthropic_sse(
@@ -126,6 +135,14 @@ impl BridgeMiddleware {
             }
         }
         .map_err(|e| ProxyError::Internal(anyhow::anyhow!("{e}")))?;
+
+        debug!(
+            ?client_format,
+            ?upstream_format,
+            output_len = output.len(),
+            converted_body = %String::from_utf8_lossy(&output),
+            "bridge: streaming response after conversion"
+        );
 
         res.body = output.into();
         // is_streaming remains true — body is still SSE
@@ -161,7 +178,17 @@ impl ProxyMiddleware for BridgeMiddleware {
 
         let bridge_req = proxy_request_to_transform_request(req);
 
+        debug!(
+            body_before = %String::from_utf8_lossy(&bridge_req.body),
+            "bridge: request body before conversion"
+        );
+
         let bridge_resp = convert_request(&bridge_req, direction)?;
+
+        debug!(
+            body_after = %String::from_utf8_lossy(&bridge_resp.body),
+            "bridge: request body after conversion"
+        );
 
         apply_transform_response_to_request(req, &bridge_resp)?;
 
