@@ -83,3 +83,4 @@ This directory contains reusable project documentation for the template reposito
 5. 需要快速定位主题时，使用 [文档搜索索引](./search.md)。
 
 Owner: baoyx · 版本：v1.1 · 生效日期：2026-05-21 · 最后更新：2026-06-12
+6. 发布流程参考 [发布指南](./release-guide.md)。
