@@ -28,28 +28,23 @@ This repository is a reusable Rust 2024 workspace template. These rules are mand
 
 ## Release Process
 
-Use the automated release script for all releases:
+发布采用两步策略，确保 CI 通过后再推送到 crates.io：
 
 ```bash
-# Full release (bump version, changelog, tag, publish to crates.io)
-./scripts/release.sh 1.2.0
+# Step 1: 更新版本号、生成 CHANGELOG、创建 tag 并推送（VERSION 支持 patch|minor|major）
+make release VERSION=patch
 
-# Or manually step by step:
-make bump-version NEW_VERSION=1.2.0
-git cliff --tag v1.2.0 -o CHANGELOG.md
-git add -A && git commit -m "chore: release v1.2.0"
-git tag -a v1.2.0 -m "Release v1.2.0"
-git push origin master && git push origin v1.2.0
-make publish-crate
+# Step 2: 等待 GitHub Actions CI 通过后，发布到 crates.io
+make release-publish
 ```
 
 ### Release Checklist
 
-1. **Version bump**: Updates `Cargo.toml` workspace version and all internal dependency versions
-2. **Changelog**: Generates CHANGELOG.md using git-cliff (install with `cargo install git-cliff`)
-3. **Validation**: Runs `cargo clippy --all-targets --all-features -- -D warnings`
-4. **Git operations**: Creates commit and annotated tag, pushes to remote
-5. **Crates.io**: Publishes all library crates in dependency order (excludes apps/server)
+1. **Version bump**: `cargo release version` 更新 workspace 所有 crate 版本号
+2. **Changelog**: 使用 git-cliff 生成 CHANGELOG.md（安装：`cargo install git-cliff`）
+3. **Validation**: CI 自动运行 `make ci`（fmt + clippy + test）
+4. **Git operations**: 创建 commit 和注解 tag，推送到 remote
+5. **Crates.io**: 按依赖顺序发布所有 library crate（排除 apps/server）
 
 ### Published Crates
 
@@ -74,7 +69,7 @@ agent-proxy-rust-core = { path = "crates/core", version = "1.1.1" }
 agent-proxy-rust-core = { path = "crates/core" }
 ```
 
-The `make bump-version` and `./scripts/release.sh` commands handle this automatically.
+`cargo release version` 和 `make release` 会自动处理版本号更新。
 
 ## Required Validation
 

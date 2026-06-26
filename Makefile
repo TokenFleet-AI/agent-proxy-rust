@@ -1,16 +1,26 @@
+.PHONY: build check test fmt clippy lint ci doc check-agent-sync release release-push release-publish publish-crate seed-manifest seed-tag
+
 build:
-	@cargo build
+	cargo build
+
+check:
+	cargo check --all-features
 
 test:
-	@cargo nextest run --all-features
+	cargo nextest run --all-features
 
 fmt:
-	@cargo +nightly fmt -- --check
+	cargo +nightly fmt
 
 clippy:
-	@cargo clippy --all-targets --all-features -- -D warnings
+	cargo clippy --all-targets --all-features -- -D warnings -W clippy::pedantic
 
 lint: fmt clippy
+
+ci: fmt clippy test
+
+doc:
+	cargo doc --open
 
 check-agent-sync:
 	@test -f CLAUDE.md || { \
@@ -18,45 +28,49 @@ check-agent-sync:
 		exit 1; \
 	}
 
-VERSION := $(shell grep -m1 '^version' Cargo.toml | cut -d'"' -f2)
-
-bump-version:
-	@if [ -z "$(NEW_VERSION)" ]; then \
-		echo "❌ Usage: make bump-version NEW_VERSION=x.y.z"; \
-		exit 1; \
-	fi
-	@echo "📦 Bumping version to $(NEW_VERSION)..."
-	@sed -i '' 's/^version = "[^"]*"/version = "$(NEW_VERSION)"/' Cargo.toml
-	@# Update workspace crate dependencies in Cargo.toml
-	@for crate in core storage model-router cost storage-sqlite bridge compress; do \
-		sed -i '' "s/agent-proxy-rust-$$crate = { path = \"[^\"]*\", version = \"[^\"]*\" }/agent-proxy-rust-$$crate = { path = \"crates/$$crate\", version = \"$(NEW_VERSION)\" }/g" Cargo.toml; \
-	done
-	@# Update internal dependencies in crate Cargo.toml files
-	@for crate in crates/compress crates/cost crates/model-router crates/resilience crates/storage-sqlite crates/bridge; do \
-		sed -i '' "s/agent-proxy-rust-\(.*\) = { path = \"[^\"]*\", version = \"[^\"]*\" }/agent-proxy-rust-\1 = { path = \"..\/\2\", version = \"$(NEW_VERSION)\" }/g" $$crate/Cargo.toml; \
-	done
-	@cargo update --workspace 2>&1 | tail -5
-	@echo "✅ Version bumped to $(NEW_VERSION)"
-
-release: release-push ## Usage: make release VERSION=x.y.z (step 1: push + tag)
+release: release-push ## Usage: make release VERSION=patch|minor|major (step 1: push + tag)
 	@echo ""
 	@echo "==> Step 1 完成: 代码已推送并创建 tag"
 	@echo "==> 请等待 GitHub Actions CI 通过"
 	@echo "==> 查看 CI 状态: gh run list --limit 1"
 	@echo "==> CI 通过后执行: make release-publish"
 
-release-push: ## Step 1: 生成 CHANGELOG、创建 tag、推送
-	@git cliff --tag v$(VERSION) -o CHANGELOG.md
-	@git commit -a -n -m "docs: update CHANGELOG for v$(VERSION)" || true
-	@cargo release tag --execute --no-confirm
-	@git push origin master
-	@git push origin v$(VERSION)
+release-push: ## Step 1: 更新版本、提交、生成 CHANGELOG、创建 tag、推送
+ifndef VERSION
+	$(error Usage: make release-push VERSION=patch|minor|major)
+endif
+	@cargo release version $(VERSION) --execute --workspace --no-confirm
+	@cargo release commit --execute --no-confirm
+	@git cliff -o CHANGELOG.md
+	@git commit -a -n -m "Update CHANGELOG.md" || true
+	@cargo release tag --execute --workspace --no-confirm
+	@git push origin master --tags
 
 release-publish: ## Step 2: 发布到 crates.io（CI 通过后执行）
 	@$(MAKE) publish-crate
 
-update-submodule:
-	@git submodule update --init --recursive --remote
+# ── Crates.io Publishing ────────────────────────────────────────────
+# Publish library crates to crates.io in dependency order
+# Only library crates are published (not apps/server)
+
+CRATES_PUBLISH_ORDER = \
+	agent-proxy-rust-core \
+	agent-proxy-rust-storage \
+	agent-proxy-rust-model-router \
+	agent-proxy-rust-cost \
+	agent-proxy-rust-resilience \
+	agent-proxy-rust-compress \
+	agent-proxy-rust-bridge \
+	agent-proxy-rust-storage-sqlite
+
+publish-crate:
+	@echo "📦 Publishing crates to crates.io..."
+	@for crate in $(CRATES_PUBLISH_ORDER); do \
+		echo "  Publishing $$crate..."; \
+		cargo release publish --execute -p $$crate --no-confirm || exit 1; \
+		sleep 2; \
+	done
+	@echo "✅ All crates published successfully"
 
 # ── Seed Data ────────────────────────────────────────────────────────
 
@@ -97,28 +111,3 @@ seed-tag: seed-manifest
 	git tag -a "$$tag" -m "Seed data v$$ver — providers/models/channels/model_mappings"; \
 	echo "✅ Created tag $$tag"; \
 	echo "   Run: git push origin $$tag"
-
-# ── Crates.io Publishing ────────────────────────────────────────────
-# Publish crates to crates.io in dependency order
-# Only library crates are published (not apps/server)
-
-CRATES_PUBLISH_ORDER = \
-	agent-proxy-rust-core \
-	agent-proxy-rust-storage \
-	agent-proxy-rust-model-router \
-	agent-proxy-rust-cost \
-	agent-proxy-rust-resilience \
-	agent-proxy-rust-compress \
-	agent-proxy-rust-bridge \
-	agent-proxy-rust-storage-sqlite
-
-publish-crate:
-	@echo "📦 Publishing crates to crates.io..."
-	@for crate in $(CRATES_PUBLISH_ORDER); do \
-		echo "  Publishing $$crate..."; \
-		cargo publish -p $$crate --allow-dirty || exit 1; \
-		sleep 2; \
-	done
-	@echo "✅ All crates published successful… (truncated)
-
-.PHONY: build test fmt clippy lint check-agent-sync release release-push release-publish publish-crate update-submodule seed-manifest seed-tag
