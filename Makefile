@@ -38,12 +38,22 @@ bump-version:
 	@cargo update --workspace 2>&1 | tail -5
 	@echo "✅ Version bumped to $(NEW_VERSION)"
 
-release:
+release: release-push ## Usage: make release VERSION=x.y.z (step 1: push + tag)
+	@echo ""
+	@echo "==> Step 1 完成: 代码已推送并创建 tag"
+	@echo "==> 请等待 GitHub Actions CI 通过"
+	@echo "==> 查看 CI 状态: gh run list --limit 1"
+	@echo "==> CI 通过后执行: make release-publish"
+
+release-push: ## Step 1: 生成 CHANGELOG、创建 tag、推送
 	@git cliff --tag v$(VERSION) -o CHANGELOG.md
 	@git commit -a -n -m "docs: update CHANGELOG for v$(VERSION)" || true
 	@cargo release tag --execute --no-confirm
 	@git push origin master
 	@git push origin v$(VERSION)
+
+release-publish: ## Step 2: 发布到 crates.io（CI 通过后执行）
+	@$(MAKE) publish-crate
 
 update-submodule:
 	@git submodule update --init --recursive --remote
@@ -111,4 +121,4 @@ publish-crate:
 	done
 	@echo "✅ All crates published successful… (truncated)
 
-.PHONY: build test fmt clippy lint check-agent-sync release publish-crate update-submodule seed-manifest seed-tag
+.PHONY: build test fmt clippy lint check-agent-sync release release-push release-publish publish-crate update-submodule seed-manifest seed-tag
