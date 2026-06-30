@@ -24,6 +24,18 @@ async fn main() -> Result<()> {
         )
         .init();
 
+    // Exception collector — writes raw errors to shared SQLite buffer.
+    // Desktop hub picks them up and handles LLM classification + reporting.
+    let ec_buffer = exception_collector::ExceptionBuffer::with_default_dir("agent-proxy-rust")
+        .map(Arc::new)
+        .unwrap_or_else(|e| {
+            tracing::warn!("exception collector unavailable: {e}");
+            Arc::new(
+                exception_collector::ExceptionBuffer::new(std::path::Path::new(":memory:"))
+                    .expect("in-memory fallback buffer")
+            )
+        });
+
     // --db-path <PATH> or AGENT_PROXY_DB_PATH env
     let db_path = parse_db_path();
     tracing::info!(path = %db_path.display(), "opening database");
@@ -43,6 +55,9 @@ async fn main() -> Result<()> {
         ),
         Err(e) => {
             tracing::warn!(error = %e, "seed data initialization failed, continuing with DB schema only");
+            exception_collector::collect_result_err(
+                &ec_buffer, "agent-proxy-rust", &format!("seed_init failed: {e}"),
+            );
         }
     }
 
