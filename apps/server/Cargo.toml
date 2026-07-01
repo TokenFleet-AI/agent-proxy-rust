@@ -36,7 +36,7 @@ tracing-subscriber = { workspace = true }
 dirs = "6"
 rand = "0.8"
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"] }
-exception-collector = { path = "../../../token-fleet-switch/crates/exception-collector" }
+exception-collector = { git = "https://github.com/TokenFleet-AI/exception-collector" }
 
 [lints]
 workspace = true
