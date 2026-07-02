@@ -417,7 +417,7 @@ impl Storage for SqliteStorage {
                  VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)
                  ON CONFLICT(id) DO UPDATE SET
                    name = excluded.name,
-                   api_key = excluded.api_key,
+                   api_key = CASE WHEN excluded.api_key != '' THEN excluded.api_key ELSE channels.api_key END,
                    protocol = excluded.protocol,
                    protocols = excluded.protocols,
                    is_builtin = excluded.is_builtin,

@@ -7,6 +7,7 @@ use agent_proxy_rust_storage::{
 };
 use agent_proxy_rust_storage_sqlite::SqliteStorage;
 use chrono::Utc;
+use secrecy::ExposeSecret;
 use serial_test::serial;
 
 async fn setup() -> SqliteStorage {
@@ -367,6 +368,72 @@ async fn test_insert_and_query_subscription_fees() {
         .await
         .expect("query failed");
     assert_eq!(fees.len(), 1);
+}
+
+// ── Upsert Channel API Key Preservation ─────────────────────────────────────
+
+#[tokio::test]
+#[serial]
+async fn test_upsert_channel_preserves_existing_api_key() {
+    let storage = setup().await;
+
+    // Set an API key on the deepseek channel
+    let secret = secrecy::SecretString::from("sk-existing-key".to_string());
+    storage
+        .set_channel_api_key("deepseek", &secret)
+        .await
+        .expect("set_channel_api_key failed");
+
+    // Verify the key was set
+    let ch = storage.get_channel("deepseek").await.unwrap().unwrap();
+    assert_eq!(ch.api_key.expose_secret(), "sk-existing-key");
+
+    // Upsert the same channel with empty api_key (simulates seed refresh)
+    let mut channel = ch.clone();
+    channel.api_key = secrecy::SecretString::from("");
+    channel.name = "Updated Name".to_string();
+    storage
+        .upsert_channel(&channel)
+        .await
+        .expect("upsert failed");
+
+    // Verify: name was updated, api_key was preserved
+    let ch = storage.get_channel("deepseek").await.unwrap().unwrap();
+    assert_eq!(ch.name, "Updated Name", "other fields should be updated");
+    assert_eq!(
+        ch.api_key.expose_secret(),
+        "sk-existing-key",
+        "existing api_key must be preserved when upsert has empty key"
+    );
+}
+
+#[tokio::test]
+#[serial]
+async fn test_upsert_channel_overwrites_when_new_key_non_empty() {
+    let storage = setup().await;
+
+    // Set an initial API key
+    let secret = secrecy::SecretString::from("sk-old-key".to_string());
+    storage
+        .set_channel_api_key("deepseek", &secret)
+        .await
+        .expect("set_channel_api_key failed");
+
+    // Upsert with a new non-empty key
+    let mut channel = storage.get_channel("deepseek").await.unwrap().unwrap();
+    channel.api_key = secrecy::SecretString::from("sk-new-key");
+    storage
+        .upsert_channel(&channel)
+        .await
+        .expect("upsert failed");
+
+    // Verify: new key was applied
+    let ch = storage.get_channel("deepseek").await.unwrap().unwrap();
+    assert_eq!(
+        ch.api_key.expose_secret(),
+        "sk-new-key",
+        "non-empty api_key in upsert should replace existing"
+    );
 }
 
 // ── Health & Lifecycle ────────────────────────────────────────────────────────
