@@ -1121,7 +1121,7 @@ mod tests {
             .await
             .unwrap();
         let providers: Vec<Value> = serde_json::from_slice(&body).unwrap();
-        assert_eq!(providers.len(), 9);
+        assert_eq!(providers.len(), 10);
     }
 
     #[tokio::test]
@@ -1136,7 +1136,7 @@ mod tests {
             .await
             .unwrap();
         let channels: Vec<Value> = serde_json::from_slice(&body).unwrap();
-        assert_eq!(channels.len(), 9);
+        assert_eq!(channels.len(), 10);
     }
 
     #[tokio::test]

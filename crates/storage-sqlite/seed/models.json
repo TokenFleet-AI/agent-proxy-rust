@@ -358,5 +358,15 @@
     "currency": "CNY",
     "context_window": 1000000,
     "created_at": 0
+  },
+  {
+    "id": "longcat:longcat-2.0",
+    "provider_id": "longcat",
+    "client_name": "longcat-2.0",
+    "price_input": 2.0,
+    "price_output": 8.0,
+    "currency": "CNY",
+    "context_window": 1000000,
+    "created_at": 0
   }
 ]

@@ -625,5 +625,16 @@
     "weight": 100,
     "enabled": true,
     "protocols": "[]"
+  },
+  {
+    "id": "longcat-official:longcat-2.0",
+    "channel_id": "longcat-official",
+    "client_name": "longcat-2.0",
+    "upstream_name": "longcat-2.0",
+    "billing": "metered",
+    "pricing_json": "{\"type\":\"per_token\",\"currency\":\"CNY\",\"input_per_mtok\":2.0,\"output_per_mtok\":8.0,\"cache_read_per_mtok\":0.04}",
+    "weight": 100,
+    "enabled": true,
+    "protocols": "[\"openai_chat\",\"anthropic_messages\"]"
   }
 ]
