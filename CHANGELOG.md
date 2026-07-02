@@ -3,18 +3,43 @@
 All notable changes to this project will be documented in this file. See [conventional commits](https://www.conventionalcommits.org/) for commit guidelines.
 
 ---
-## [1.1.1](https://github.com/compare/v1.1.0..v1.1.1) - 2026-06-24
+## [1.2.0](https://github.com/compare/v1.1.0..v1.2.0) - 2026-07-02
 
 ### Bug Fixes
 
-- suppress clippy duration_suboptimal_units lint for Rust 1.96 compatibility - ([ace6250](https://github.com/commit/ace6250)) - baoyx
-- handle renamed and new clippy lints for Rust 1.96 compatibility - ([b22c5e2](https://github.com/commit/b22c5e2)) - baoyx
-- allow duration_suboptimal_units lint in is_tryable_past_cooldown - ([142ac92](https://github.com/commit/142ac92)) - baoyx
-- allow duration_suboptimal_units lint in resilience test modules - ([3517454](https://github.com/commit/3517454)) - baoyx
+- **(ci)** resolve all CI failures - ([3b94ac4](https://github.com/commit/3b94ac48ac8a05c5a4958e9197eeb3b2f00b31a9)) - baoyx
+- suppress clippy duration_suboptimal_units lint for Rust 1.96 compatibility - ([ace6250](https://github.com/commit/ace625083d6faabe996f5893d18546a78d40f6a6)) - baoyx
+- handle renamed and new clippy lints for Rust 1.96 compatibility - ([b22c5e2](https://github.com/commit/b22c5e24c2a600e979bca082dca6be0ff4be268f)) - baoyx
+- allow duration_suboptimal_units lint in is_tryable_past_cooldown - ([142ac92](https://github.com/commit/142ac92c11266d4d7752126a297fc64244d7b382)) - baoyx
+- allow duration_suboptimal_units lint in resilience test modules - ([3517454](https://github.com/commit/35174542f33fbf9cfa219cc86c1f9cd97bce5cc5)) - baoyx
+- add version to workspace dependencies for crates.io publishing - ([c0e68f4](https://github.com/commit/c0e68f46d91c178eee0c91796a19c72f2640900d)) - baoyx
+- add reverse mapping OpenaiChat→OpenaiResponses for streaming - ([3245b82](https://github.com/commit/3245b827b33842a11083f97edb1910d9635bc9fd)) - baoyx
+- TokenFleet CN use openai_responses protocol, restrict mimo to openai_chat - ([0253336](https://github.com/commit/0253336e7a8711f21dba9aee76329fccf2e8b82a)) - baoyx
+
+### Documentation
+
+- add release guide with two-step workflow - ([d302f0b](https://github.com/commit/d302f0b826e24c3f6e4ef85d3501eda7cdb81d28)) - baoyx
+
+### Features
+
+- split release into push and publish steps for CI safety - ([5b5306a](https://github.com/commit/5b5306a19ef22d70264ed759ef907164ae017886)) - baoyx
+- integrate exception-collector for error reporting (#1) - ([7892915](https://github.com/commit/7892915033cec08a9837b3c2c723ca1d206102ac)) - baoyx
 
 ### Miscellaneous Chores
 
-- upgrade Rust toolchain from 1.89.0 to 1.96.0 to match CI - ([115a876](https://github.com/commit/115a876)) - baoyx
+- upgrade Rust toolchain to 1.96.0 and fix clippy lints - ([115a876](https://github.com/commit/115a876dab0b267ee262adc7fc4df048490af015)) - baoyx
+- release v1.1.1 - ([cc36905](https://github.com/commit/cc369056788be78abc8317dd914251ded4a8b7c7)) - baoyx
+- add bump-version Makefile target - ([b86bfe2](https://github.com/commit/b86bfe295e44d3d5681314961fa131418ca5e3d8)) - baoyx
+- add automated release script and document release process - ([3ac42df](https://github.com/commit/3ac42df6d8fbdcf70f36f2377c2ccee3e82ebbcb)) - baoyx
+- add debug logging for request tracing - ([96d5fc1](https://github.com/commit/96d5fc1c73b19ecf3a1c487b8bcc14a2c0a45bf8)) - baoyx
+- align Makefile with llm-bridge-rust - ([fb0b600](https://github.com/commit/fb0b600e6b9930268571e6f9e86efb3e00a3e54a)) - baoyx
+- use exception-collector v0.1 from crates.io - ([efd6fb5](https://github.com/commit/efd6fb5325dba092b38f821225295dff60ef38d3)) - baoyx
+- release v1.2.0 - ([324a176](https://github.com/commit/324a176d5c66ce7d4984f217a38635663d4dbea0)) - baoyx
+
+### Refactoring
+
+- use git dependency for exception-collector - ([6080447](https://github.com/commit/6080447c1a865f2c766c385e2efa124e4c078c2e)) - baoyx
+- change release flow to bump-version-after-publish - ([09fa099](https://github.com/commit/09fa09906b9534a1af7feaf37d9fdde488db2593)) - baoyx
 
 ---
 ## [1.1.0](https://github.com/compare/v1.0.1..v1.1.0) - 2026-06-24
@@ -27,9 +52,10 @@ All notable changes to this project will be documented in this file. See [conven
 
 - real health probe with cheapest model, 429 30s retry - ([8c26ce2](https://github.com/commit/8c26ce237156d882c284234b98988ba142a73ac4)) - baoyx
 
-### Dependencies
+### Miscellaneous Chores
 
-- bump tokenless-schema to 1.2 in compress crate
+- release v1.1.0 - ([c26f264](https://github.com/commit/c26f264cd3cadc6041ff41e579d11aa4855c9b9e)) - baoyx
+- sync lockfile and bump tokenless-schema to 1.2 - ([1916fcf](https://github.com/commit/1916fcf87e9edda129590217cfda140a4a7606c0)) - baoyx
 
 ---
 ## [1.0.1](https://github.com/compare/v1.0.0..v1.0.1) - 2026-06-12
