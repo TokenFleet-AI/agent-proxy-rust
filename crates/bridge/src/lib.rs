@@ -58,8 +58,8 @@ impl ConversionDirection {
             (ApiFormat::OpenaiResponses, ApiFormat::AnthropicMessages) => {
                 Self::ResponsesToAnthropic
             }
-            (ApiFormat::OpenaiResponses, ApiFormat::OpenaiChat) => Self::ResponsesToOpenai,
-            (ApiFormat::OpenaiChat, ApiFormat::OpenaiResponses) => Self::ResponsesToOpenai,
+            (ApiFormat::OpenaiResponses, ApiFormat::OpenaiChat)
+            | (ApiFormat::OpenaiChat, ApiFormat::OpenaiResponses) => Self::ResponsesToOpenai,
             // Future protocol pairs fall through to passthrough.
             _ => Self::Passthrough,
         }

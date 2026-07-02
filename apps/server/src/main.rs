@@ -26,15 +26,7 @@ async fn main() -> Result<()> {
 
     // Exception collector — writes raw errors to shared SQLite buffer.
     // Desktop hub picks them up and handles LLM classification + reporting.
-    let ec_buffer = exception_collector::ExceptionBuffer::with_default_dir("agent-proxy-rust")
-        .map(Arc::new)
-        .unwrap_or_else(|e| {
-            tracing::warn!("exception collector unavailable: {e}");
-            Arc::new(
-                exception_collector::ExceptionBuffer::new(std::path::Path::new(":memory:"))
-                    .expect("in-memory fallback buffer")
-            )
-        });
+    let ec_buffer = init_exception_buffer()?;
 
     // --db-path <PATH> or AGENT_PROXY_DB_PATH env
     let db_path = parse_db_path();
@@ -56,7 +48,9 @@ async fn main() -> Result<()> {
         Err(e) => {
             tracing::warn!(error = %e, "seed data initialization failed, continuing with DB schema only");
             exception_collector::collect_result_err(
-                &ec_buffer, "agent-proxy-rust", &format!("seed_init failed: {e}"),
+                &ec_buffer,
+                "agent-proxy-rust",
+                &format!("seed_init failed: {e}"),
             );
         }
     }
@@ -75,8 +69,8 @@ async fn main() -> Result<()> {
     let admin_key = admin_auth::resolve_admin_key();
     if admin_key.generated {
         tracing::warn!(
-            "auto-generated admin key — set AGENT_PROXY_ADMIN_KEY to avoid this. \
-             Key (first 8 chars): {}...",
+            "auto-generated admin key — set AGENT_PROXY_ADMIN_KEY to avoid this. Key (first 8 \
+             chars): {}...",
             &admin_key.key[..8]
         );
     }
@@ -133,6 +127,20 @@ async fn main() -> Result<()> {
 
     axum::serve(listener, app).await?;
     Ok(())
+}
+
+fn init_exception_buffer() -> Result<Arc<exception_collector::ExceptionBuffer>> {
+    match exception_collector::ExceptionBuffer::with_default_dir("agent-proxy-rust") {
+        Ok(buf) => Ok(Arc::new(buf)),
+        Err(e) => {
+            tracing::warn!(
+                "exception collector unavailable: {e}, falling back to in-memory buffer"
+            );
+            exception_collector::ExceptionBuffer::new(std::path::Path::new(":memory:"))
+                .map(Arc::new)
+                .map_err(Into::into)
+        }
+    }
 }
 
 fn parse_db_path() -> PathBuf {
