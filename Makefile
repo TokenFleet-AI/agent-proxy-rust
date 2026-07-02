@@ -1,4 +1,4 @@
-.PHONY: build check test fmt clippy lint ci doc check-agent-sync release release-push release-publish publish-crate seed-manifest seed-tag
+.PHONY: build check test fmt clippy lint ci doc check-agent-sync release release-push release-publish bump publish-crate seed-manifest seed-tag
 
 build:
 	cargo build
@@ -28,26 +28,41 @@ check-agent-sync:
 		exit 1; \
 	}
 
-release: release-push ## Usage: make release VERSION=patch|minor|major (step 1: push + tag)
+# ── Release ──────────────────────────────────────────────────────────
+# Three-step flow:
+#   make release                    → tag + CHANGELOG + push（不修改版本号）
+#   make release-publish            → crates.io 发布
+#   make bump VERSION=patch|minor   → 发布成功后 bump 版本号
+
+CURRENT_VERSION := $(shell grep '^version' Cargo.toml | head -1 | sed 's/.*"\(.*\)".*/\1/')
+
+release: release-push ## Step 1: 用当前版本号打 tag + 生成 CHANGELOG + 推送
 	@echo ""
-	@echo "==> Step 1 完成: 代码已推送并创建 tag"
+	@echo "==> ✅ Step 1 完成: tag v$(CURRENT_VERSION) 已推送"
 	@echo "==> 请等待 GitHub Actions CI 通过"
 	@echo "==> 查看 CI 状态: gh run list --limit 1"
 	@echo "==> CI 通过后执行: make release-publish"
+	@echo "==> 发布成功后执行: make bump VERSION=patch|minor"
 
-release-push: ## Step 1: 更新版本、提交、生成 CHANGELOG、创建 tag、推送
-ifndef VERSION
-	$(error Usage: make release-push VERSION=patch|minor|major)
-endif
-	@cargo release version $(VERSION) --execute --workspace --no-confirm
-	@cargo release commit --execute --no-confirm
-	@git cliff -o CHANGELOG.md
-	@git commit -a -n -m "Update CHANGELOG.md" || true
-	@cargo release tag --execute --workspace --no-confirm
+release-push: ## Step 1: 生成 CHANGELOG、创建 tag（不修改版本号）、推送
+	@echo "📦 准备发布 v$(CURRENT_VERSION)..."
+	@git cliff --tag "v$(CURRENT_VERSION)" -o CHANGELOG.md
+	@git commit -a -n -m "chore: update CHANGELOG for v$(CURRENT_VERSION)" || true
+	@git tag -a "v$(CURRENT_VERSION)" -m "Release v$(CURRENT_VERSION)"
 	@git push origin master --tags
+	@echo "✅ tag v$(CURRENT_VERSION) 已创建并推送"
 
 release-publish: ## Step 2: 发布到 crates.io（CI 通过后执行）
 	@$(MAKE) publish-crate
+
+bump: ## Step 3: 发布成功后升级版本号（Usage: make bump VERSION=patch|minor|major）
+ifndef VERSION
+	$(error Usage: make bump VERSION=patch|minor|major)
+endif
+	@cargo release version $(VERSION) --execute --workspace --no-confirm
+	@cargo release commit --execute --no-confirm
+	@git push origin master
+	@echo "✅ 版本号已升级并推送"
 
 # ── Crates.io Publishing ────────────────────────────────────────────
 # Publish library crates to crates.io in dependency order

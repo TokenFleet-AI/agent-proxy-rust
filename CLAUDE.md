@@ -28,23 +28,28 @@ This repository is a reusable Rust 2024 workspace template. These rules are mand
 
 ## Release Process
 
-发布采用两步策略，确保 CI 通过后再推送到 crates.io：
+发布采用三步策略：**先 tag，CI 通过后发布，发布成功后再 bump 版本号**。
+
+版本号声明在 `Cargo.toml` 的 `[workspace.package]` 中，所有 crate 继承 `version.workspace = true`。
 
 ```bash
-# Step 1: 更新版本号、生成 CHANGELOG、创建 tag 并推送（VERSION 支持 patch|minor|major）
-make release VERSION=patch
+# Step 1: 生成 CHANGELOG、创建 tag（用当前版本号）、推送（无需 VERSION 参数）
+make release
 
 # Step 2: 等待 GitHub Actions CI 通过后，发布到 crates.io
 make release-publish
+
+# Step 3: 发布成功后升级版本号（VERSION 支持 patch|minor|major）
+make bump VERSION=patch
 ```
 
 ### Release Checklist
 
-1. **Version bump**: `cargo release version` 更新 workspace 所有 crate 版本号
+1. **Tag & Push**: `make release` 用当前版本号生成 CHANGELOG、创建注解 tag、推送到 remote
 2. **Changelog**: 使用 git-cliff 生成 CHANGELOG.md（安装：`cargo install git-cliff`）
 3. **Validation**: CI 自动运行 `make ci`（fmt + clippy + test）
-4. **Git operations**: 创建 commit 和注解 tag，推送到 remote
-5. **Crates.io**: 按依赖顺序发布所有 library crate（排除 apps/server）
+4. **Crates.io**: `make release-publish` 按依赖顺序发布所有 library crate（排除 apps/server）
+5. **Version bump**: `make bump VERSION=patch|minor` 升级版本号，准备下一轮开发
 
 ### Published Crates
 
