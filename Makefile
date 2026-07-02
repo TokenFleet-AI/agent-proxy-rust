@@ -97,7 +97,7 @@ ci-status: ## 检查 GitHub Actions CI 状态
 	@gh run list --limit 1 --json status,conclusion,name,createdAt,headBranch \
 		--jq '.[0] | "  \(.name) (\(.headBranch)): \(.status) \(.conclusion // "in progress") \(.createdAt)"'
 	@echo ""
-	@if gh run list --limit 1 --json status,conclusion --jq '.[0].conclusion' | grep -q '"success"'; then \
+	@if gh run list --limit 1 --json status,conclusion --jq '.[0].conclusion' | grep -q 'success'; then \
 		echo "✅ CI passed"; \
 	else \
 		echo "❌ CI not passing — check with: gh run list --limit 3"; \
