@@ -1,4 +1,4 @@
-.PHONY: build check test fmt clippy lint ci doc check-agent-sync release release-push release-publish bump publish-crate seed-manifest seed-tag
+.PHONY: build check test fmt clippy lint ci doc check-agent-sync release release-push release-publish bump publish-crate publish-one seed-manifest seed-tag
 
 build:
 	cargo build
@@ -29,10 +29,13 @@ check-agent-sync:
 	}
 
 # ── Release ──────────────────────────────────────────────────────────
-# Three-step flow:
+# Full release (三步):
 #   make release                    → tag + CHANGELOG + push（不修改版本号）
-#   make release-publish            → crates.io 发布
+#   make release-publish            → crates.io 发布全部
 #   make bump VERSION=patch|minor   → 发布成功后 bump 版本号
+#
+# 单个 crate 发布:
+#   make publish-one CRATE=agent-proxy-rust-storage-sqlite [VERSION=patch|minor|major]
 
 CURRENT_VERSION := $(shell grep '^version' Cargo.toml | head -1 | sed 's/.*"\(.*\)".*/\1/')
 
@@ -86,6 +89,26 @@ publish-crate:
 		sleep 2; \
 	done
 	@echo "✅ All crates published successfully"
+
+publish-one: ## 发布单个 crate（Usage: make publish-one CRATE=agent-proxy-rust-storage-sqlite [VERSION=patch|minor|major]）
+ifndef CRATE
+	$(error Usage: make publish-one CRATE=<crate-name> [VERSION=patch|minor|major])
+endif
+ifdef VERSION
+	@echo "⬆️  Bumping version ($(VERSION))..."
+	@cargo release version $(VERSION) --execute --workspace --no-confirm
+	@cargo release commit --execute --no-confirm
+	@echo ""
+endif
+	@echo "📦 Publishing $(CRATE)..."
+	@cargo release publish --execute -p $(CRATE) --no-confirm
+	@echo ""
+	@echo "🏷️  Tagging and pushing..."
+	@NEW_VER=$$(grep '^version' Cargo.toml | head -1 | sed 's/.*"\(.*\)".*/\1/'); \
+	git tag -a "v$$NEW_VER" -m "Release v$$NEW_VER" --force; \
+	git push origin master --tags
+	@echo ""
+	@echo "✅ $(CRATE) published successfully"
 
 # ── Seed Data ────────────────────────────────────────────────────────
 
