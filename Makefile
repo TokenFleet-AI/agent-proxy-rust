@@ -1,4 +1,4 @@
-.PHONY: build check test fmt clippy lint ci doc check-agent-sync release release-push release-publish bump publish-crate publish-one seed-manifest seed-tag
+.PHONY: build check test fmt clippy lint ci doc check-agent-sync release release-push release-publish bump publish-crate publish-selected ci-status seed-manifest seed-tag
 
 build:
 	cargo build
@@ -34,8 +34,10 @@ check-agent-sync:
 #   make release-publish            → crates.io 发布全部
 #   make bump VERSION=patch|minor   → 发布成功后 bump 版本号
 #
-# 单个 crate 发布:
-#   make publish-one CRATE=agent-proxy-rust-storage-sqlite [VERSION=patch|minor|major]
+# 选择性发布:
+#   make ci-status                  → 检查 GitHub CI 状态
+#   make publish-selected CRATES="agent-proxy-rust-storage-sqlite" [VERSION=patch]
+#   make publish-selected CRATES="agent-proxy-rust-storage agent-proxy-rust-storage-sqlite"
 
 CURRENT_VERSION := $(shell grep '^version' Cargo.toml | head -1 | sed 's/.*"\(.*\)".*/\1/')
 
@@ -90,9 +92,21 @@ publish-crate:
 	done
 	@echo "✅ All crates published successfully"
 
-publish-one: ## 发布单个 crate（Usage: make publish-one CRATE=agent-proxy-rust-storage-sqlite [VERSION=patch|minor|major]）
-ifndef CRATE
-	$(error Usage: make publish-one CRATE=<crate-name> [VERSION=patch|minor|major])
+ci-status: ## 检查 GitHub Actions CI 状态
+	@echo "🔍 Checking GitHub Actions CI status..."
+	@gh run list --limit 1 --json status,conclusion,name,createdAt,headBranch \
+		--jq '.[0] | "  \(.name) (\(.headBranch)): \(.status) \(.conclusion // "in progress") \(.createdAt)"'
+	@echo ""
+	@if gh run list --limit 1 --json status,conclusion --jq '.[0].conclusion' | grep -q '"success"'; then \
+		echo "✅ CI passed"; \
+	else \
+		echo "❌ CI not passing — check with: gh run list --limit 3"; \
+		exit 1; \
+	fi
+
+publish-selected: ci-status ## 选择性发布 crate（Usage: make publish-selected CRATES="crate1 crate2" [VERSION=patch|minor|major]）
+ifndef CRATES
+	$(error Usage: make publish-selected CRATES="crate1 crate2 ..." [VERSION=patch|minor|major])
 endif
 ifdef VERSION
 	@echo "⬆️  Bumping version ($(VERSION))..."
@@ -100,15 +114,19 @@ ifdef VERSION
 	@cargo release commit --execute --no-confirm
 	@echo ""
 endif
-	@echo "📦 Publishing $(CRATE)..."
-	@cargo release publish --execute -p $(CRATE) --no-confirm
+	@echo "📦 Publishing selected crates..."
+	@for crate in $(CRATES); do \
+		echo "  Publishing $$crate..."; \
+		cargo release publish --execute -p $$crate --no-confirm || exit 1; \
+		sleep 2; \
+	done
 	@echo ""
 	@echo "🏷️  Tagging and pushing..."
 	@NEW_VER=$$(grep '^version' Cargo.toml | head -1 | sed 's/.*"\(.*\)".*/\1/'); \
 	git tag -a "v$$NEW_VER" -m "Release v$$NEW_VER" --force; \
 	git push origin master --tags
 	@echo ""
-	@echo "✅ $(CRATE) published successfully"
+	@echo "✅ Published: $(CRATES)"
 
 # ── Seed Data ────────────────────────────────────────────────────────
 
