@@ -9,7 +9,7 @@ repository.workspace = true
 homepage.workspace = true
 
 [dependencies]
-agent-proxy-rust-core = { path = "../core", version = "1.2.0" }
+agent-proxy-rust-core = { path = "../core", version = "1.2.1" }
 tokenless-schema = "1.2"
 async-trait = "0.1"
 bytes = "1"
